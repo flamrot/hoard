@@ -21,7 +21,14 @@ jobs:
         with: { name: hoard-windows, path: dist/Hoard.exe }
 
   macos:
-    runs-on: macos-latest          # Apple Silicon (arm64)
+    # Intel (x86_64, also runs on Apple Silicon via Rosetta) and native Apple Silicon (arm64).
+    # Apple Silicon runners are often queued for a long time, so each one is allowed to fail on its own.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,7 +41,7 @@ jobs:
       - name: Smoke test
         run: python3 packaging/smoke_test.py dist/Hoard.app/Contents/MacOS/Hoard --trash
       - uses: actions/upload-artifact@v4
-        with: { name: hoard-macos, path: dist/*.dmg }
+        with: { name: "hoard-${{ matrix.os }}", path: dist/*.dmg }
 
   linux:
     runs-on: ubuntu-22.04          # oldest glibc we support; the AppImage runs on newer distros too

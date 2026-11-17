@@ -9,7 +9,7 @@ Runs on **Windows**, **macOS** and **Linux**.
 | OS | File | Notes |
 |---|---|---|
 | Windows 10/11 | `Hoard.exe` | Single file, no install. The first run may show "Windows protected your PC" because the exe isn't code-signed: **More info → Run anyway**. |
-| macOS 12+ (Apple Silicon) | `Hoard-<version>-macos-arm64.dmg` | Drag Hoard to Applications. It isn't notarized, so the first time **right-click → Open** (or run `xattr -dr com.apple.quarantine /Applications/Hoard.app`). To scan everything, give it **Full Disk Access** in System Settings → Privacy & Security. |
+| macOS 12+ | `Hoard-<version>-macos-arm64.dmg` (Apple Silicon) or `-x86_64.dmg` (Intel; also runs on Apple Silicon) | Drag Hoard to Applications. It isn't notarized, so the first time **right-click → Open** (or run `xattr -dr com.apple.quarantine /Applications/Hoard.app`). To scan everything, give it **Full Disk Access** in System Settings → Privacy & Security. |
 | Linux (any distro) | `Hoard-<version>-x86_64.AppImage` | `chmod +x Hoard-*.AppImage` and run it. Needs glibc 2.35+ (Ubuntu 22.04 or newer). |
 | Debian / Ubuntu | `hoard_<version>_amd64.deb` | `sudo apt install ./hoard_*.deb`, then start **Hoard** from the app menu or run `hoard`. |
 
