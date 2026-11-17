@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Hoard
+GenericName=Disk Usage Analyzer
+Comment=See what's taking up disk space
+Exec=hoard
+Icon=hoard
+Terminal=false
+Categories=Utility;System;Filesystem;
+Keywords=disk;space;usage;treemap;storage;

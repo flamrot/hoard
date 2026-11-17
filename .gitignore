@@ -1,0 +1,19 @@
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+/Hoard.exe
+
+# personal files kept in this folder but not part of the app
+/Hoard.ico
+/Hoard.lnk
+/Hoard.7z
+/tree.json
+/treemap.html
+/template.html
+/scan.py
+/scan.log
+/build.py
+/top.py
+/hoard/import_old.py
