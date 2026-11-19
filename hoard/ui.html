@@ -501,6 +501,42 @@ dialog.wide { width: min(580px, calc(100% - 32px)); max-height: calc(100vh - 48p
 dialog.xl { width: min(900px, calc(100% - 32px)); }
 
 main[hidden], .toolbar[hidden], .tabs button[hidden] { display: none; }
+
+/* ---------- simple mode */
+.simpletoggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: var(--ink-2); font-weight: 500; user-select: none; }
+.simpletoggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.simpletoggle .sw { position: relative; width: 32px; height: 18px; border-radius: 999px; background: var(--line-2); transition: background .15s; }
+.simpletoggle .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
+.simpletoggle input:checked + .sw { background: var(--accent); }
+.simpletoggle input:checked + .sw::after { transform: translateX(14px); }
+.simpletoggle input:focus-visible + .sw { outline: 2px solid var(--accent); outline-offset: 2px; }
+body.simple .views, body.simple #stageBtn { display: none; }
+.simple-wrap { max-width: 860px; margin: 0 auto; padding: 28px 24px 60px; display: grid; gap: 16px; }
+.scard { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 22px 24px; }
+.scard h3 { margin: 0 0 4px; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+.scard .sub { color: var(--ink-2); margin: 0 0 14px; }
+.hero { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; }
+.hero .free { font-size: 34px; font-weight: 700; letter-spacing: -.03em; line-height: 1.1; }
+.hero .free small { font-size: 15px; font-weight: 500; color: var(--ink-3); letter-spacing: 0; }
+.hero .meter { grid-column: 1 / -1; height: 14px; border-radius: 7px; background: var(--line); overflow: hidden; }
+.hero .meter i { display: block; height: 100%; border-radius: 7px; background: var(--accent); transition: width .4s ease-out; }
+.hero .meter i.warn { background: var(--grow); }
+.hero .meter i.hot { background: var(--danger); }
+.verdict { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; margin-top: 6px; }
+.verdict::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--shrink); }
+.verdict.warn::before { background: var(--grow); }
+.verdict.hot::before { background: var(--danger); }
+.bigbtn { height: 44px; padding: 0 20px; font-size: 15px; border-radius: 10px; }
+.srow { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 4px 14px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.srow:first-of-type { border-top: 0; }
+.srow .n { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow .p { grid-column: 1; color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow .s { grid-row: 1 / 3; grid-column: 2; font-weight: 650; font-variant-numeric: tabular-nums; }
+.srow .a { grid-row: 1 / 3; grid-column: 3; display: flex; gap: 6px; }
+.catbar { display: grid; grid-template-columns: 150px 1fr 80px; gap: 12px; align-items: center; padding: 6px 0; }
+.catbar .bar { height: 12px; border-radius: 6px; background: var(--line); overflow: hidden; }
+.catbar .bar i { display: block; height: 100%; border-radius: 6px; }
+.catbar span:last-child { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); }
 /* never let a crowded toolbar push the whole window sideways */
 html, body { overflow-x: clip; }
 header, .toolbar { min-width: 0; max-width: 100vw; overflow-x: clip; }
@@ -545,6 +581,8 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
       <span class="spinner sm"></span><span id="scanChipText" class="num">Scanning…</span><span class="minibar"><i id="scanChipBar"></i></span>
     </button>
     <span id="status"></span>
+    <label class="simpletoggle" title="Simple mode: just the essentials, in plain words">
+      <input type="checkbox" id="simpleSw"><span class="sw"></span><span>Simple</span></label>
     <button class="stagebtn" id="stageBtn" title="Staging area: things you've picked to remove. Drag blocks here, or press S.">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M1.5 9.5 3.5 3h9l2 6.5v3.5h-13z"/><path d="M1.5 9.5h4l1 1.5h3l1-1.5h4"/></svg>
       <span id="stageLabel">Staged</span><b id="stageCount" class="num">0</b>
@@ -703,7 +741,7 @@ const fullPath = p => {
 };
 // Top-level items of a system disk can't be deleted; on other disks (macOS/Linux) the first level can.
 const canDelete = path => vol().type === "cloud" ? !!vol().trashable && path.length >= 1
-  : vol().location ? path.length >= 1 : path.length >= (S.os === "windows" || vol().root === "/" ? 2 : 1);
+  : vol().location ? path.length >= 1 : path.length >= (S.os === "windows" ? (vol().system ? 2 : 1) : vol().root === "/" ? 2 : 1);
 async function copyText(t) {
   try { await navigator.clipboard.writeText(t); return true; } catch { /* fall through for webviews without clipboard access */ }
   const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
@@ -995,6 +1033,7 @@ async function loadView(path, opts = {}) {
   }
   drawOverlay(); renderAll();
   if (S.searchRes) runSearch();
+  if (S.mode === "simple") renderSimple();
 }
 function zoomInto(path, rect) { closeMenu(); return loadView(path, { fromRect: rect }); }
 function goUp() {
@@ -1411,6 +1450,7 @@ addEventListener("keydown", e => {
     if ($("#filters").classList.contains("open")) return toggleFilters(false);
     if (menu.style.display === "block") closeMenu(); else if (S.focusCat !== null) { S.focusCat = null; draw(); drawOverlay(); renderComp(); } else setSel(null); return;
   }
+  if (S.mode === "simple") return;
   if (!e.ctrlKey && !e.metaKey && !e.altKey && "1234".includes(e.key) && e.key.length === 1) { setMode(["map", "cleanup", "dupes", "apps"][+e.key - 1]); return; }
   if (S.mode !== "map") return;
   if (e.key === "/") { e.preventDefault(); $("#q").focus(); return; }
@@ -1523,9 +1563,11 @@ async function startScan() {
     if (r.error) return toast(r.error, "error");
     S.scanFast = !!r.fast;
   } catch (e) { return toast(e.message, "error"); }
-  S.scanning = true; S.scanMin = false; S.lastProg = null; shownBytes = targetBytes = 0;
+  S.scanning = true; S.scanMin = S.mode === "simple"; S.lastProg = null; shownBytes = targetBytes = 0;
   closeMenu(); tip.style.display = "none";
-  showState("scan"); renderAll();
+  if (S.scanMin) updateScanUI(null); else showState("scan");
+  renderAll();
+  if (S.mode === "simple") renderSimple();
   poll();
 }
 async function poll() {
@@ -1597,6 +1639,7 @@ function setMode(m) {
   if (m === "cleanup") renderCleanup();
   if (m === "dupes") renderDupes();
   if (m === "apps") renderApps();
+  if (m === "simple") renderSimple();
   if (isMap) requestAnimationFrame(() => { sizeCanvas(); if (S.view) { layout(); draw(); drawOverlay(); } });
 }
 document.querySelectorAll(".views button").forEach(b => b.onclick = () => setMode(b.dataset.view));
@@ -2129,6 +2172,149 @@ async function uninstallApp(a) {
   if (r.error) toast(r.error, "error"); else toast(`Started the uninstaller for ${a.name}`, "ok", "Press Refresh here when it's finished.");
 }
 
+/* ------------------------------------------------------------------ simple mode */
+function setSimple(on) {
+  S.simple = on;
+  $("#simpleSw").checked = on;
+  document.body.classList.toggle("simple", on);
+  try { localStorage.setItem("hoard.simple", on ? "1" : "0"); } catch { /* private mode */ }
+  setMode(on ? "simple" : "map");
+}
+$("#simpleSw").onchange = e => setSimple(e.target.checked);
+function meaningfulFolders(view, limit = 6) {
+  const out = [], tot = view.s || 1;
+  (function rec(n, path, depth) {
+    for (const c of n.ch || []) {
+      if (c.k !== "d" || c.s < tot * .02) continue;
+      const p = path.concat(c.n), kids = (c.ch || []).filter(x => x.k !== "o");
+      const top = kids.reduce((m, x) => Math.max(m, x.s), 0);
+      // a folder whose size is mostly one subfolder isn't the real answer: look inside it
+      if (top >= c.s * .6 && depth < 7 && kids.length) rec(c, p, depth + 1);
+      else out.push({ n: c.n, s: c.s, p, c: c.c, k: "d", f: c.f });
+    }
+  })(view, [], 0);
+  return out.sort((a, b) => b.s - a.s).slice(0, limit);
+}
+let simpleTok = 0;
+async function renderSimple() {
+  if (S.mode !== "simple") return;
+  const p = $("#panel"), my = ++simpleTok;
+  const d = S.drives.find(x => x.id === S.drive) || vol();
+  const pct = d.total ? d.used / d.total : 0;
+  const [cls, verdict] = pct > .9 ? ["hot", "Almost full"] : pct > .75 ? ["warn", "Getting full"] : ["", "Plenty of space"];
+  const checked = S.meta?.time ? `Last checked ${ago(S.meta.time)}` : "Not checked yet";
+  const hero = `<div class="scard hero"><div>
+      <div style="color:var(--ink-3);font-weight:600">${esc(d.name)} ${esc(d.type === "cloud" ? "" : d.label || "")}</div>
+      <div class="free num">${d.total ? fmt(d.free) : fmt(S.view?.s || 0)} <small>${d.total ? `free of ${fmt(d.total)}` : "in use"}</small></div>
+      ${d.total ? `<div class="verdict ${cls}">${verdict}</div>` : ""}</div>
+      <div style="text-align:right"><button class="btn primary bigbtn" id="simpleScan" ${S.scanning ? "disabled" : ""}>${S.scanning ? "Checking…" : S.meta?.has ? "Check again" : "Check this drive"}</button>
+        <div style="font-size:12px;color:var(--ink-3);margin-top:6px">${S.scanning ? "This takes a minute or less" : checked}</div></div>
+      ${d.total ? `<div class="meter"><i class="${cls}" style="width:${(pct * 100).toFixed(1)}%"></i></div>` : ""}</div>`;
+  if (!S.meta?.has || !S.view) {
+    p.innerHTML = `<div class="simple-wrap">${hero}<div class="scard"><h3>Let Hoard take a look</h3><p class="sub">Press <b>Check this drive</b>. Hoard reads every folder, nothing is changed, and then shows you what's using the space and what's safe to remove.</p></div></div>`;
+    $("#simpleScan").onclick = startScan;
+    return;
+  }
+  if (S.path.length) { await loadView([]); return; }
+  const v = S.view, cats = v.cats.map((s, i) => ({ s, i })).filter(c => c.s > 0).sort((a, b) => b.s - a.s);
+  const maxCat = cats[0]?.s || 1;
+  const folders = meaningfulFolders(v);
+  p.innerHTML = `<div class="simple-wrap">${hero}
+    <div class="scard" id="sClean"><h3>Free up space safely</h3><div class="loading">${SPIN}Looking for things that are safe to clear…</div></div>
+    <div class="scard"><h3>What's taking up the space</h3><p class="sub">By kind of file.</p>
+      ${cats.slice(0, 7).map(c => `<div class="catbar"><span>${CATN[c.i]}</span><span class="bar"><i style="width:${(c.s / maxCat * 100).toFixed(1)}%;background:var(--c${c.i})"></i></span><span>${fmt(c.s)}</span></div>`).join("")}</div>
+    <div class="scard"><h3>Biggest folders</h3><p class="sub">Where the space really goes.</p>
+      ${folders.map((f, k) => `<div class="srow"><span class="n">${esc(f.n)}</span><span class="p">${esc(fullPath(f.p.slice(0, -1)))}</span>
+        <span class="s">${fmt(f.s)}</span><span class="a"><button class="btn" data-fshow="${k}">Show on map</button></span></div>`).join("") || `<p class="sub">Nothing stands out.</p>`}</div>
+    <div class="scard" id="sOld"><h3>Big files you haven't touched in a year</h3><div class="loading">${SPIN}Looking…</div></div>
+    <div class="scard" id="sGrew"><h3>What grew lately</h3><div class="loading">${SPIN}Comparing…</div></div>
+    <p style="text-align:center;color:var(--ink-3)">Want the full map, duplicates and apps? Switch off <b>Simple</b> at the top.</p></div>`;
+  $("#simpleScan").onclick = startScan;
+  p.querySelectorAll("[data-fshow]").forEach(b => b.onclick = () => showOnMap(folders[+b.dataset.fshow].p, folders[+b.dataset.fshow]));
+  fillSimpleClean(my); fillSimpleOld(my); fillSimpleGrew(my);
+}
+function showOnMap(path, node) {
+  setSimple(false);
+  jumpTo({ p: path, s: node.s, k: node.k || "d", c: node.c, a: node.a, f: node.f });
+}
+async function fillSimpleClean(my) {
+  if (!S.cleanup || (!S.cleanup.running && Date.now() - (S.cleanupAt || 0) > 10 * 60000)) {
+    S.cleanupAt = Date.now();
+    await api("cleanup_start").catch(() => {});
+  }
+  let st;
+  for (;;) {
+    try { st = await api("cleanup_status"); } catch { return; }
+    if (my !== simpleTok) return;
+    if (!st.running) break;
+    await new Promise(r => setTimeout(r, 700));
+  }
+  S.cleanup = st;
+  const safe = st.items.filter(i => (i.action === "clear" || i.action === "empty_bin" || i.action === "cloud_empty") && !i.review && i.size > 0);
+  const total = safe.reduce((a, i) => a + i.size, 0);
+  const el = $("#sClean");
+  if (!el) return;
+  el.innerHTML = `<h3>Free up space safely</h3>${total ? `<p class="sub">Temporary files, caches and the ${esc(S.trashName)}: all rebuilt or no longer needed.</p>
+      ${safe.map(i => `<div class="srow"><span class="n">${esc(i.title)}</span><span class="p">${esc(i.desc)}</span><span class="s">${fmt(i.size)}</span><span class="a"></span></div>`).join("")}
+      <div style="margin-top:14px"><button class="btn primary bigbtn" id="sCleanGo">Free up ${fmt(total)}</button></div>`
+    : `<p class="sub">Nothing to clear right now. Your caches and temporary files are already small.</p>`}`;
+  const go = $("#sCleanGo");
+  if (go) go.onclick = () => simpleCleanup(safe);
+}
+async function simpleCleanup(items) {
+  const d = $("#dlg"); d.className = "";
+  d.innerHTML = `<h3>Free up space?</h3><p>Untick anything you'd rather keep. These are deleted for good, but they're temporary files and caches that apps rebuild when needed.</p>
+    ${items.map((i, k) => `<label class="cand" style="grid-template-columns:22px minmax(0,1fr) auto"><input type="checkbox" data-k="${k}" checked><span class="cp">${esc(i.title)}</span><span class="cz">${fmt(i.size)}</span></label>`).join("")}
+    <div class="row-actions"><button class="btn" id="scNo">Cancel</button><button class="btn danger solid" id="scYes">Free up space</button></div>`;
+  $("#scNo").onclick = () => d.close();
+  $("#scYes").onclick = async () => {
+    const pick = [...d.querySelectorAll("[data-k]")].filter(x => x.checked).map(x => items[+x.dataset.k]);
+    const b = $("#scYes"); b.disabled = true;
+    let freed = 0, skipped = 0;
+    for (const [k, i] of pick.entries()) {
+      b.innerHTML = `${SPIN}${k + 1} of ${pick.length}…`;
+      const r = await api("cleanup_run", { id: i.id }).catch(e => ({ error: e.message }));
+      if (r.error) toast(`${i.title}: ${r.error}`, "error");
+      freed += r.freed || 0; skipped += r.skipped || 0;
+    }
+    d.close();
+    toast(`Freed ${fmt(freed)}`, "ok", skipped ? `${skipped.toLocaleString()} files were in use and were left alone.` : "");
+    S.cleanup = null;
+    await refreshDrives();
+    renderSimple();
+  };
+  d.showModal();
+}
+async function fillSimpleOld(my) {
+  let r;
+  try { r = await api("search", { drive: S.drive, path: [], kind: "file", olderDays: 365, minSize: 500 * MB }); } catch { return; }
+  const el = $("#sOld");
+  if (my !== simpleTok || !el) return;
+  const items = r.items.slice(0, 6);
+  el.innerHTML = `<h3>Big files you haven't touched in a year</h3>${items.length ? `<p class="sub">Old downloads, videos and disk images are the usual suspects. Removing sends them to the ${esc(S.trashName)}.</p>
+    ${items.map((it, k) => `<div class="srow"><span class="n">${esc(it.p[it.p.length - 1])}</span><span class="p">${esc(fullPath(it.p.slice(0, -1)))} · last changed ${dateStr(it.a)}</span>
+      <span class="s">${fmt(it.s)}</span><span class="a"><button class="btn" data-oshow="${k}">Show</button>${canDelete(it.p) ? `<button class="btn danger" data-odel="${k}">Remove</button>` : ""}</span></div>`).join("")}`
+    : `<p class="sub">None. Every big file here has been used in the last year${r.items ? "" : ", or this scan has no file dates (check the drive again)"}.</p>`}`;
+  el.querySelectorAll("[data-oshow]").forEach(b => b.onclick = () => { const it = items[+b.dataset.oshow]; showOnMap(it.p, { s: it.s, k: "f", c: it.c, a: it.a }); });
+  el.querySelectorAll("[data-odel]").forEach(b => b.onclick = () => {
+    const it = items[+b.dataset.odel];
+    confirmRecycle(it.p, { n: it.p[it.p.length - 1], s: it.s, k: "f", c: it.c });
+  });
+}
+async function fillSimpleGrew(my) {
+  let r;
+  try { r = await api("changes", { drive: S.drive, path: [] }); } catch { return; }
+  const el = $("#sGrew");
+  if (my !== simpleTok || !el) return;
+  if (r.noPrev) { el.innerHTML = `<h3>What grew lately</h3><p class="sub">Check the drive again in a few days (or turn on the daily check in Settings) and Hoard will show what grew.</p>`; return; }
+  const items = r.items.filter(i => i.d > 0).slice(0, 4);
+  el.innerHTML = `<h3>What grew lately</h3><p class="sub">Since ${esc(when(r.prevTime))}.</p>${items.length
+    ? items.map((it, k) => `<div class="srow"><span class="n">${esc(it.p[it.p.length - 1])}</span><span class="p">${esc(fullPath(it.p.slice(0, -1)))}</span>
+        <span class="s d grow">+${fmt(it.d)}</span><span class="a"><button class="btn" data-gshow="${k}">Show</button></span></div>`).join("")
+    : `<p class="sub">Nothing grew by 50 MB or more.</p>`}`;
+  el.querySelectorAll("[data-gshow]").forEach(b => b.onclick = () => { const it = items[+b.dataset.gshow]; showOnMap(it.p, it); });
+}
+
 /* ------------------------------------------------------------------ updates */
 function updateLine(u) {
   if (!u) return "Not checked yet.";
@@ -2255,7 +2441,7 @@ async function selectDrive(L) {
   renderAll(); showState("loading");
   try { S.meta = await api("open_drive", { drive: L }); } catch (e) { toast(e.message, "error"); return; }
   renderStatus();
-  if (!S.meta.has) { showState("empty"); renderAll(); return; }
+  if (!S.meta.has) { showState("empty"); renderAll(); if (S.mode === "simple") renderSimple(); return; }
   await loadHistory();
   await loadView([]);
 }
@@ -2409,7 +2595,7 @@ async function openSettings() {
 $("#settingsBtn").onclick = openSettings;
 
 setInterval(() => api("ping").catch(() => {}), 20000);
-addEventListener("pagehide", () => navigator.sendBeacon("/api/bye", ""));
+addEventListener("pagehide", () => navigator.sendBeacon("/api/bye", TOKEN));
 
 (async () => {
   sizeCanvas(); readColors();
@@ -2421,6 +2607,7 @@ addEventListener("pagehide", () => navigator.sendBeacon("/api/bye", ""));
   const sys = (running.running && S.drives.find(d => d.id === running.drive))
     || S.drives.find(d => d.id === "C" || d.id === "root") || S.drives[0];
   if (!sys) return showStateMessage("No disks found", "Hoard couldn't find any disks it can read.");
+  try { if (localStorage.getItem("hoard.simple") === "1") setSimple(true); } catch { /* private mode */ }
   await selectDrive(sys.id);
   if (running.running) {            // the window was reloaded mid-scan: pick the scan back up
     S.scanning = true; S.scanMin = !!S.view; S.lastProg = running;

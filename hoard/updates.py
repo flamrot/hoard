@@ -35,6 +35,15 @@ def cached():
         return None
 
 
+TRUSTED_HOSTS = {"github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+
+
+def _trusted(url):
+    from urllib.parse import urlparse
+    u = urlparse(url or "")
+    return u.scheme == "https" and u.hostname in TRUSTED_HOSTS
+
+
 def _pick_asset(assets):
     names = [(a.get("name", ""), a.get("browser_download_url")) for a in assets]
     if plat.NAME == "windows":
@@ -60,8 +69,9 @@ def check(force=False):
         with urllib.request.urlopen(req, timeout=10) as r:
             rel = json.load(r)
         name, asset = _pick_asset(rel.get("assets", []))
+        sums = {a.get("name"): a.get("browser_download_url") for a in rel.get("assets", [])}
         out.update(latest=rel.get("tag_name", "").lstrip("v"), page=rel.get("html_url"), notes=(rel.get("body") or "")[:2000],
-                   asset=asset, assetName=name)
+                   asset=asset, assetName=name, checksum=sums.get(f"{name}.sha256") if name else None)
         out["newer"] = _ver(out["latest"]) > _ver(core.VERSION)
     except urllib.error.HTTPError as ex:
         out["error"] = ("No releases are visible. If the GitHub repository is private, update checks can't see it; "
@@ -87,12 +97,27 @@ def apply():
         return {"ok": True, "opened": True}
     exe = sys.executable
     new = exe + ".new"
+    import hashlib
     try:
-        req = urllib.request.Request(c["asset"], headers={"User-Agent": "Hoard-update"})
-        with urllib.request.urlopen(req, timeout=120) as r, open(new, "wb") as f:
-            shutil.copyfileobj(r, f)
-        if os.path.getsize(new) < 1 << 20:
-            raise OSError("the download looks incomplete")
+        # only from GitHub over HTTPS, and only if it matches the checksum published with the release
+        if not _trusted(c["asset"]) or not _trusted(c.get("checksum")):
+            raise OSError("the release has no checksum from GitHub, so it can't be verified")
+        with urllib.request.urlopen(urllib.request.Request(c["checksum"], headers={"User-Agent": "Hoard-update"}),
+                                    timeout=30) as r:
+            want = r.read(200).decode("ascii", "replace").split()[0].lower()
+        h = hashlib.sha256()
+        with urllib.request.urlopen(urllib.request.Request(c["asset"], headers={"User-Agent": "Hoard-update"}),
+                                    timeout=120) as r, open(new, "wb") as f:
+            if not _trusted(r.geturl()):
+                raise OSError("the download was redirected somewhere unexpected")
+            while True:
+                b = r.read(1 << 20)
+                if not b:
+                    break
+                h.update(b)
+                f.write(b)
+        if h.hexdigest() != want:
+            raise OSError("the download doesn't match the release's checksum")
         old = exe + ".old"
         if os.path.exists(old):
             os.remove(old)
@@ -120,7 +145,8 @@ def cleanup_old():
 
 # ---------------------------------------------------------------- Windows per-user install
 def install_dir():
-    return os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Hoard")
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    return os.path.join(base, "Programs", "Hoard")
 
 
 def is_installed():
@@ -173,6 +199,16 @@ def install(desktop=False):
     return {"ok": True, "path": target}
 
 
+def safe_to_remove(path):
+    """Only ever delete our own folders: absolute, named Hoard, at least a few levels deep, existing."""
+    return (bool(path) and os.path.isabs(path) and os.path.basename(path.rstrip("\\/")).lower() == "hoard"
+            and len([p for p in os.path.normpath(path).split(os.sep) if p]) >= 4 and os.path.isdir(path))
+
+
+def uninstall_targets(keep_data):
+    return [t for t in [install_dir()] + ([] if keep_data else [core.DATA_DIR]) if safe_to_remove(t)]
+
+
 def uninstall_interactive():
     """Run from Settings → Apps → Hoard → Uninstall (Hoard.exe --uninstall)."""
     if plat.NAME != "windows":
@@ -196,7 +232,10 @@ def uninstall_interactive():
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
     except OSError:
         pass
-    targets = [install_dir()] + ([] if keep else [core.DATA_DIR])
+    targets = uninstall_targets(keep)
+    if not targets:
+        mb(None, "Hoard has been removed from the Start menu and Settings → Apps.", "Uninstall Hoard", 0x40)
+        return 0
     # the running exe can't delete itself: a short-lived cmd does it once we've exited
     cmd = "ping -n 3 127.0.0.1 >nul & " + " & ".join(f'rmdir /s /q "{t}"' for t in targets)
     subprocess.Popen(["cmd", "/c", cmd], creationflags=NO_WINDOW | 0x00000008)

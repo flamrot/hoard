@@ -1,0 +1,300 @@
+"""Unit tests for Hoard's risky parts: paths, deletion guards, cleanup, staging, snapshots, comparisons,
+duplicates, cloud listings, updates and the uninstaller.  Run:  python -m unittest discover -s tests -v
+Uses a temporary data folder, so real saved scans and settings are never touched."""
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+TMP = tempfile.mkdtemp(prefix="hoard-tests-")
+os.environ["HOARD_DATA_DIR"] = os.path.join(TMP, "data")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hoard"))
+
+import cleanup  # noqa: E402
+import cloud  # noqa: E402
+import core  # noqa: E402
+import dupes  # noqa: E402
+import plat  # noqa: E402
+import reports  # noqa: E402
+import server  # noqa: E402
+import updates  # noqa: E402
+import apps  # noqa: E402
+
+MB = 1 << 20
+
+
+def write(path, size, mtime=None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(os.urandom(size))
+    if mtime:
+        os.utime(path, (mtime, mtime))
+
+
+def tree(spec, name="root"):
+    """Build a Node tree: {"dir": {...}, "file.ext": size}."""
+    n = core.Node(name)
+    for k, v in spec.items():
+        if isinstance(v, dict):
+            c = tree(v, k)
+            n.dirs.append(c)
+            n.size += c.size
+            n.nfiles += c.nfiles
+        else:
+            cat = core.cat_of(k)
+            n.files.append((k, v, cat, 1_700_000_000))
+            n.size += v
+            n.nfiles += 1
+            n.cats[cat] += v
+    return n
+
+
+class Paths(unittest.TestCase):
+    def test_clean_parts_accepts_normal_names(self):
+        self.assertEqual(server.clean_parts(["Users", "me", "file name (1).txt"]), ["Users", "me", "file name (1).txt"])
+
+    def test_clean_parts_rejects_escapes(self):
+        for bad in (["..", "Windows"], ["a", "."], ["a/b"], ["a\\b"], [""], ["x\0"], "notalist", [3]):
+            with self.assertRaises(ValueError, msg=bad):
+                server.clean_parts(bad)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows rules")
+    def test_windows_streams_rejected(self):
+        with self.assertRaises(ValueError):
+            server.clean_parts(["file.txt:hidden"])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows rules")
+    def test_windows_protected(self):
+        sysd = os.environ.get("SystemDrive", "C:") + "\\"
+        P = plat.protected
+        self.assertTrue(P(sysd, ["Users"], sysd + "Users"))                                  # top level of C:
+        self.assertTrue(P(sysd, ["Windows", "System32"], sysd + "Windows\\System32"))       # Windows folder
+        home = os.path.expanduser("~")
+        parts = home[3:].split("\\")
+        self.assertTrue(P(sysd, parts, home))                                               # the profile itself
+        self.assertTrue(P(sysd, parts + ["AppData"], home + "\\AppData"))
+        self.assertIsNone(P(sysd, parts + ["Downloads", "x.zip"], home + "\\Downloads\\x.zip"))
+        other = "Q:\\" if sysd.upper() != "Q:\\" else "R:\\"
+        self.assertIsNone(P(other, ["Games"], other + "Games"))                            # top level of a data drive
+        self.assertTrue(P(other, [], other))
+        self.assertTrue(P(other, ["System Volume Information"], other + "System Volume Information"))
+
+
+class Cleanup(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(dir=TMP)
+
+    def test_too_broad(self):
+        self.assertTrue(cleanup._too_broad(os.path.expanduser("~")))
+        self.assertTrue(cleanup._too_broad(os.path.abspath(os.sep)))
+        if os.environ.get("LOCALAPPDATA"):
+            self.assertTrue(cleanup._too_broad(os.environ["LOCALAPPDATA"]))
+        self.assertFalse(cleanup._too_broad(os.path.join(self.d, "cache")))
+
+    def test_clear_keeps_root_and_new_files(self):
+        old = time.time() - 10 * 86400
+        write(os.path.join(self.d, "c", "old.tmp"), 1000, old)
+        write(os.path.join(self.d, "c", "sub", "old2.tmp"), 2000, old)
+        write(os.path.join(self.d, "c", "new.tmp"), 3000)
+        st = cleanup.clear([os.path.join(self.d, "c")], older=time.time() - 86400)
+        self.assertEqual(st["files"], 2)
+        self.assertTrue(os.path.isdir(os.path.join(self.d, "c")))            # the folder itself stays
+        self.assertTrue(os.path.exists(os.path.join(self.d, "c", "new.tmp")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "c", "sub")))    # emptied subfolder removed
+
+    def test_clear_refuses_home(self):
+        st = cleanup.clear([os.path.expanduser("~")])
+        self.assertEqual(st["files"], 0)
+        self.assertEqual(st["skipped"], 1)
+
+    @unittest.skipIf(sys.platform == "win32", "symlinks need privileges on Windows")
+    def test_clear_never_follows_links(self):
+        outside = os.path.join(self.d, "outside")
+        write(os.path.join(outside, "precious.txt"), 10)
+        os.makedirs(os.path.join(self.d, "c2"))
+        os.symlink(outside, os.path.join(self.d, "c2", "link"))
+        cleanup.clear([os.path.join(self.d, "c2")])
+        self.assertTrue(os.path.exists(os.path.join(outside, "precious.txt")))
+
+    def test_expand_dedupes_nested(self):
+        os.makedirs(os.path.join(self.d, "a", "b"))
+        got = cleanup.expand([os.path.join(self.d, "a"), os.path.join(self.d, "a", "b"), os.path.join(self.d, "nope")])
+        self.assertEqual(got, [os.path.normpath(os.path.join(self.d, "a"))])
+
+    def test_run_rejects_unknown_ids(self):
+        self.assertIn("error", cleanup.run("../../etc"))
+
+    def test_node_modules_finder(self):
+        old = int(time.time()) - 200 * 86400
+        proj = tree({"proj": {"node_modules": {"big.js": 30 * MB}, "index.js": 10}})
+        p = proj.child("proj")
+        p.own, p.child("node_modules").mtime = old, int(time.time())
+        found, rescan = cleanup.find_node_modules([(self.d, proj)])
+        self.assertEqual([f["name"] for f in found], ["proj/node_modules"])
+        p.own = int(time.time())                                     # project touched recently -> not suggested
+        self.assertEqual(cleanup.find_node_modules([(self.d, proj)])[0], [])
+
+
+class Snapshots(unittest.TestCase):
+    def test_roundtrip_and_legacy(self):
+        t = tree({"a": {"x.mp4": 5 * MB}, "y.txt": 10})
+        t.cloud, t.mtime = 123, 456
+        back = core._dec(json.loads(json.dumps(core._enc(t))))
+        self.assertEqual((back.size, back.cloud, back.mtime), (t.size, 123, 456))
+        legacy = ["r", 10, 1, [0] * 9, 0, 0, [["f.bin", 10, 8]], []]   # version 1: no dates, 3-field files
+        n = core._dec(legacy)
+        self.assertEqual(n.files, [("f.bin", 10, 8, 0)])
+        self.assertEqual(n.mtime, 0)
+
+    def test_new_ts_always_increases(self):
+        vid = "unit-ts"
+        t = tree({"f": 1})
+        a = core.new_ts(vid)
+        core.save_snapshot(vid, t, a)
+        b = core.new_ts(vid)
+        self.assertGreater(b, a)
+        core.save_snapshot(vid, t, b)
+        core.prune(vid, 1)                    # never fewer than 2 kept
+        self.assertEqual(len(core.list_snaps(vid)), 2)
+
+    def test_bin_is_not_ai_model(self):
+        self.assertEqual(core.cat_of("data.bin"), core.OTHER)
+        self.assertEqual(core.cat_of("model.safetensors"), 7)
+
+
+class Changes(unittest.TestCase):
+    def test_growth_points_at_the_cause(self):
+        prev = tree({"Users": {"me": {"Downloads": {"a.zip": 10 * MB}}}})
+        cur = tree({"Users": {"me": {"Downloads": {"a.zip": 10 * MB, "big.iso": 900 * MB}}}})
+        s = {"cur": cur, "prev": prev, "prev_partial": False, "changes": None}
+        ch = server.all_changes(s)
+        self.assertEqual(ch[0][1], ("Users", "me", "Downloads", "big.iso"))     # the file, not every parent
+        self.assertNotIn(("Users",), [c[1] for c in ch])
+
+    def test_view_folds_small_and_ignored(self):
+        t = tree({"big": {"x.mp4": 100 * MB}, "tiny": {"t.txt": 10}, "skip": {"s.mp4": 50 * MB}})
+        v = server.view_json(t, None, False, 2, 1 * MB, (), {("skip",)})
+        names = [c["n"] for c in v["ch"]]
+        self.assertIn("big", names)
+        self.assertNotIn("skip", names)
+        self.assertEqual(v["ign"], 50 * MB)
+        self.assertTrue(any(c["k"] == "o" for c in v["ch"]))       # "tiny" folded into "smaller items"
+
+
+class Staging(unittest.TestCase):
+    def setUp(self):
+        core.write_staged([])
+
+    def test_parent_replaces_children_and_children_are_skipped(self):
+        server.staged_add([{"vol": "X", "path": ["a", "b", "c.txt"], "size": 1}])
+        server.staged_add([{"vol": "X", "path": ["a"], "size": 5}])
+        self.assertEqual([i["path"] for i in core.read_staged()], [["a"]])
+        self.assertEqual(server.staged_add([{"vol": "X", "path": ["a", "z"], "size": 1}]), 0)
+
+    def test_bad_paths_never_staged(self):
+        self.assertEqual(server.staged_add([{"vol": "X", "path": ["..", "Windows"], "size": 1}]), 0)
+        self.assertEqual(core.read_staged(), [])
+
+
+class Duplicates(unittest.TestCase):
+    def test_finds_identical_not_same_size(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        data = os.urandom(3 * MB)
+        for n in ("a.bin", "b.bin"):
+            with open(os.path.join(d, n), "wb") as f:
+                f.write(data)
+        with open(os.path.join(d, "c.bin"), "wb") as f:            # same size, different bytes
+            f.write(os.urandom(3 * MB))
+        files = [{"path": os.path.join(d, n), "p": [n], "size": 3 * MB, "m": 0, "c": 8} for n in ("a.bin", "b.bin", "c.bin")]
+        job = {"running": True, "phase": "", "done": 0, "total": 0, "groups": None, "cancel": False,
+               "cancelled": False, "error": None}
+        dupes.run(job, files)
+        self.assertEqual(len(job["groups"]), 1)
+        self.assertEqual(sorted(f["p"][0] for f in job["groups"][0]["files"]), ["a.bin", "b.bin"])
+
+
+class Cloud(unittest.TestCase):
+    def test_lsjson_parser(self):
+        lines = "\n".join([
+            "[",
+            '{"Path":"Photos","Name":"Photos","Size":-1,"ModTime":"2024-01-01T10:00:00Z","IsDir":true},',
+            '{"Path":"Photos/trip.mp4","Name":"trip.mp4","Size":3000000000,"ModTime":"2024-05-31T16:15:57.034468261+01:00","IsDir":false},',
+            '{"Path":"Docs/Plan","Name":"Plan","Size":-1,"ModTime":"2025-01-01T00:00:00Z","IsDir":false},',
+            '{"Path":"Docs/sub/n.txt","Name":"n.txt","Size":500,"ModTime":"2025-01-01T00:00:00Z","IsDir":false}',
+            "]"])
+
+        class Fake:
+            def __init__(self, *a, **k):
+                self.stdout, self.stderr, self.returncode = io.StringIO(lines), io.StringIO(""), 0
+
+            def wait(self):
+                return 0
+
+            def kill(self):
+                pass
+        real_popen, real_exe = subprocess.Popen, cloud.exe
+        subprocess.Popen, cloud.exe = Fake, (lambda: "rclone")
+        try:
+            t = cloud.scan_remote({"root": "g:", "name": "Google Drive"}, core.Scan("x", 0))
+        finally:
+            subprocess.Popen, cloud.exe = real_popen, real_exe
+        self.assertEqual(t.size, 3_000_000_500)
+        self.assertEqual(t.child("Photos").files[0][3], 1717168557)
+        self.assertEqual(t.child("Docs").child("sub").size, 500)
+
+    def test_untrashable_cloud_refuses(self):
+        ok, err = cloud.trash({"trashable": False, "name": "S3"}, ["x"], False)
+        self.assertFalse(ok)
+
+
+class Updates(unittest.TestCase):
+    def test_version_compare(self):
+        self.assertGreater(updates._ver("v1.10.0"), updates._ver("1.9.9"))
+        self.assertEqual(updates._ver("1.1"), (1, 1, 0))
+
+    def test_only_github_https_trusted(self):
+        self.assertTrue(updates._trusted("https://github.com/flamrot/hoard/releases/download/v1/Hoard.exe"))
+        self.assertFalse(updates._trusted("http://github.com/x"))
+        self.assertFalse(updates._trusted("https://github.com.evil.example/x"))
+        self.assertFalse(updates._trusted(None))
+
+    def test_apply_refuses_without_checksum(self):
+        with open(updates.CACHE, "w") as f:
+            json.dump({"newer": True, "latest": "9.9.9", "asset": "https://github.com/x/Hoard.exe", "checksum": None}, f)
+        real = getattr(sys, "frozen", None)
+        sys.frozen = True
+        try:
+            if plat.NAME == "windows":
+                self.assertIn("checksum", updates.apply().get("error", ""))
+        finally:
+            if real is None:
+                del sys.frozen
+
+    def test_uninstall_only_touches_hoard_folders(self):
+        self.assertFalse(updates.safe_to_remove(os.path.expanduser("~")))
+        self.assertFalse(updates.safe_to_remove("Programs\\Hoard"))                 # relative
+        self.assertFalse(updates.safe_to_remove(os.path.abspath(os.sep) + "Hoard"))  # too shallow
+        deep = os.path.join(TMP, "a", "b", "Hoard")
+        os.makedirs(deep, exist_ok=True)
+        self.assertTrue(updates.safe_to_remove(deep))
+
+
+class Misc(unittest.TestCase):
+    def test_csv_formula_neutralised(self):
+        self.assertEqual(reports.safe_cell("=HYPERLINK(1)"), "'=HYPERLINK(1)")
+        self.assertEqual(reports.safe_cell(-5), -5)
+
+    def test_app_folder_matching(self):
+        app = {"name": "Visual Studio Code", "publisher": "Microsoft Corporation"}
+        toks = apps.tokens(app)
+        self.assertTrue(apps.matches("Code", {"code"} | toks, app) or apps.matches("visualstudiocode", toks, app))
+        self.assertFalse(apps.matches("Temp", toks, app))
+
+
+if __name__ == "__main__":
+    unittest.main()

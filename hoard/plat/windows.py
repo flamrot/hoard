@@ -43,7 +43,8 @@ def list_volumes():
         label = ctypes.create_unicode_buffer(261)
         k32.GetVolumeInformationW(root, label, 261, None, None, None, None, 0)
         kind = {2: "removable", 3: "fixed", 4: "network"}[dtype]
-        out.append({"id": L, "root": root, "name": f"{L}:", "label": label.value or
+        out.append({"id": L, "system": root.upper().startswith((os.environ.get("SystemDrive") or "C:").upper()),
+                    "root": root, "name": f"{L}:", "label": label.value or
                     {"fixed": "Local disk", "removable": "Removable", "network": "Network"}[kind],
                     "type": kind, "total": u.total, "used": u.used, "free": u.free})
     return out
@@ -79,9 +80,15 @@ def reveal(path):
 
 
 def protected(root, parts, full):
-    if len(parts) < 2:
-        return "Top-level folders and files can't be removed from here."
-    full = full.lower()
+    sysdrive = (os.environ.get("SystemDrive") or "C:").upper()
+    on_system = root.upper().startswith(sysdrive)
+    if len(parts) < (2 if on_system else 1):
+        return "Top-level folders and files of the Windows drive can't be removed from here." if on_system \
+            else "That's the whole drive."
+    if parts[0].lower() in ("$recycle.bin", "system volume information", "recovery", "boot",
+                            "$windows.~bt", "$windows.~ws", "$winreagent", "config.msi"):
+        return "That's a Windows system folder; it can't be removed from here."
+    full = os.path.normpath(full).lower()
     win = (os.environ.get("SystemRoot") or "C:\\Windows").lower()
     if full == win or full.startswith(win + "\\"):
         return "Windows system files can't be removed from here."

@@ -8,6 +8,8 @@
 //!   [name, size, nfiles, cats[9], osize, ocount, [[file, size, cat, mtime]...], [child dirs...],
 //!    newest_mtime, size*mtime sum, newest direct-file mtime, online-only bytes]
 
+#[cfg(windows)]
+mod mft {
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -49,16 +51,18 @@ fn fixup(rec: &mut [u8], sector: usize) -> bool {
 }
 
 /// Decode a non-resident attribute's data runs into (starting cluster, cluster count) pairs.
+/// Never reads past the attribute or the record, so a damaged entry can't crash the scan.
 fn data_runs(rec: &[u8], attr: usize) -> Vec<(i64, u64)> {
     let mut runs = Vec::new();
+    if attr + 0x40 > rec.len() { return runs; }
+    let end = (attr + u32le(rec, attr + 4) as usize).min(rec.len());
     let mut p = attr + u16le(rec, attr + 0x20) as usize;
-    let end = attr + u32le(rec, attr + 4) as usize;
     let mut lcn: i64 = 0;
     while p < end && rec[p] != 0 {
         let h = rec[p];
         let (ln, lo) = ((h & 0x0f) as usize, (h >> 4) as usize);
         p += 1;
-        if p + ln + lo > end { break; }
+        if ln > 8 || lo > 8 || p + ln + lo > end { break; }
         let mut len: u64 = 0;
         for i in 0..ln { len |= (rec[p + i] as u64) << (8 * i); }
         p += ln;
@@ -86,6 +90,7 @@ struct Records {
 }
 
 fn parse_record(rec: &[u8], idx: usize, r: &mut Records) {
+    if rec.len() < 0x30 { return; }
     let base = (u64le(rec, 0x20) & 0xFFFF_FFFF_FFFF) as usize;
     let target = if base != 0 { base } else { idx };
     if target >= r.parent.len() { return; }
@@ -103,20 +108,23 @@ fn parse_record(rec: &[u8], idx: usize, r: &mut Records) {
         if len == 0 || off + len > rec.len() { break; }
         let nonres = rec[off + 8];
         let name_len = rec[off + 9];
+        // the header must fit inside the attribute: 0x18 bytes resident, 0x40 non-resident
+        if len < if nonres == 0 { 0x18 } else { 0x40 } { off += len; continue; }
+        let attr_end = off + len;
         match typ {
             0x10 if nonres == 0 && base == 0 => { // $STANDARD_INFORMATION
                 let c = off + u16le(rec, off + 0x14) as usize;
-                if c + 0x24 <= rec.len() {
+                if c + 0x24 <= attr_end {
                     r.mtime[idx] = unix_time(u64le(rec, c + 0x08));
                     if u32le(rec, c + 0x20) & CLOUD_ATTRS != 0 { r.flags[idx] |= 8; }
                 }
             }
             0x30 if nonres == 0 => { // $FILE_NAME
                 let c = off + u16le(rec, off + 0x14) as usize;
-                if c + 0x42 > rec.len() { off += len; continue; }
+                if c + 0x42 > attr_end { off += len; continue; }
                 let nlen = rec[c + 0x40] as usize;
                 let ns = rec[c + 0x41];
-                if c + 0x42 + nlen * 2 > rec.len() { off += len; continue; }
+                if c + 0x42 + nlen * 2 > attr_end { off += len; continue; }
                 let have = r.flags[target] & 4 != 0;
                 // prefer Win32 / POSIX names over 8.3 DOS names; keep the first real name for hard links
                 if !have || (r.name_ns[target] == 2 && ns != 2) {
@@ -198,8 +206,8 @@ fn run() -> Result<(), String> {
         let typ = u32le(&rec0, off);
         if typ == 0xFFFF_FFFF { break; }
         let len = u32le(&rec0, off + 4) as usize;
-        if len == 0 { break; }
-        if typ == 0x80 && rec0[off + 8] == 1 && rec0[off + 9] == 0 {
+        if len == 0 || off + len > rec0.len() { break; }
+        if typ == 0x80 && rec0[off + 8] == 1 && rec0[off + 9] == 0 && len >= 0x40 {
             runs = data_runs(&rec0, off);
             mft_size = u64le(&rec0, off + 0x30);
             break;
@@ -346,7 +354,7 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
+pub fn main() {
     // a big stack for the worker thread, just in case
     let h = std::thread::Builder::new().stack_size(64 << 20).spawn(run).unwrap();
     match h.join().unwrap() {
@@ -358,4 +366,137 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal 1 KB FILE record with an update-sequence array, ready for attributes at 0x38.
+    fn record() -> Vec<u8> {
+        let mut r = vec![0u8; 1024];
+        r[0..4].copy_from_slice(b"FILE");
+        r[4..6].copy_from_slice(&0x30u16.to_le_bytes()); // USA offset
+        r[6..8].copy_from_slice(&3u16.to_le_bytes()); // USN + 2 sector entries
+        r[0x14..0x16].copy_from_slice(&0x38u16.to_le_bytes()); // first attribute
+        r[0x16..0x18].copy_from_slice(&1u16.to_le_bytes()); // in use
+        r[0x30..0x32].copy_from_slice(&[0xAB, 0xCD]); // USN
+        r[0x32..0x34].copy_from_slice(&[1, 2]); // real bytes for the end of sector 1
+        r[0x34..0x36].copy_from_slice(&[3, 4]); // ... and sector 2
+        r[510..512].copy_from_slice(&[0xAB, 0xCD]);
+        r[1022..1024].copy_from_slice(&[0xAB, 0xCD]);
+        r
+    }
+
+    fn put_attr(r: &mut Vec<u8>, off: usize, typ: u32, body: &[u8], nonres: bool) -> usize {
+        let hdr = if nonres { 0x40 } else { 0x18 };
+        let len = (hdr + body.len() + 7) & !7;
+        r[off..off + 4].copy_from_slice(&typ.to_le_bytes());
+        r[off + 4..off + 8].copy_from_slice(&(len as u32).to_le_bytes());
+        r[off + 8] = nonres as u8;
+        if !nonres {
+            r[off + 0x10..off + 0x14].copy_from_slice(&(body.len() as u32).to_le_bytes());
+            r[off + 0x14..off + 0x16].copy_from_slice(&(hdr as u16).to_le_bytes());
+        }
+        r[off + hdr..off + hdr + body.len()].copy_from_slice(body);
+        off + len
+    }
+
+    fn records(n: usize) -> Records {
+        Records { parent: vec![NONE; n], flags: vec![0; n], name_ns: vec![0; n], size: vec![0; n],
+                  mtime: vec![0; n], name: vec![Box::from(""); n] }
+    }
+
+    #[test]
+    fn fixup_restores_sector_ends_and_rejects_torn_records() {
+        let mut r = record();
+        assert!(fixup(&mut r, 512));
+        assert_eq!(&r[510..512], &[1, 2]);
+        assert_eq!(&r[1022..1024], &[3, 4]);
+        let mut torn = record();
+        torn[1022] = 0; // sector 2 written by a different update
+        assert!(!fixup(&mut torn, 512));
+        let mut short = vec![0u8; 20];
+        assert!(!fixup(&mut short, 512));
+    }
+
+    #[test]
+    fn parses_name_size_time_and_cloud_flag() {
+        let mut r = record();
+        let mut si = vec![0u8; 0x30];
+        let ft: u64 = (1_700_000_000 + 11_644_473_600) * 10_000_000;
+        si[8..16].copy_from_slice(&ft.to_le_bytes());
+        si[0x20..0x24].copy_from_slice(&0x40_0000u32.to_le_bytes()); // RECALL_ON_DATA_ACCESS
+        let mut off = put_attr(&mut r, 0x38, 0x10, &si, false);
+        let name: Vec<u16> = "movie.mp4".encode_utf16().collect();
+        let mut fname = vec![0u8; 0x42 + name.len() * 2];
+        fname[0..8].copy_from_slice(&5u64.to_le_bytes()); // parent = root
+        fname[0x40] = name.len() as u8;
+        fname[0x41] = 1; // Win32 name
+        for (i, u) in name.iter().enumerate() { fname[0x42 + i * 2..0x44 + i * 2].copy_from_slice(&u.to_le_bytes()); }
+        off = put_attr(&mut r, off, 0x30, &fname, false);
+        off = put_attr(&mut r, off, 0x80, &[7u8; 100], false); // resident data, 100 bytes
+        r[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        let mut rs = records(10);
+        parse_record(&r, 7, &mut rs);
+        assert_eq!(&*rs.name[7], "movie.mp4");
+        assert_eq!(rs.parent[7], 5);
+        assert_eq!(rs.size[7], 100);
+        assert_eq!(rs.mtime[7], 1_700_000_000);
+        assert_eq!(rs.flags[7] & 8, 8, "online-only flag");
+    }
+
+    #[test]
+    fn damaged_records_are_skipped_not_crashing() {
+        // attribute claims to run past the end of the record
+        let mut r = record();
+        r[0x38..0x3C].copy_from_slice(&0x30u32.to_le_bytes());
+        r[0x3C..0x40].copy_from_slice(&5000u32.to_le_bytes());
+        let mut rs = records(4);
+        parse_record(&r, 1, &mut rs);
+        // a FILE_NAME whose content offset points outside the attribute
+        let mut r2 = record();
+        let off = put_attr(&mut r2, 0x38, 0x30, &[0u8; 8], false);
+        r2[0x38 + 0x14..0x38 + 0x16].copy_from_slice(&900u16.to_le_bytes());
+        r2[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        parse_record(&r2, 2, &mut rs);
+        assert_eq!(rs.flags[2] & 4, 0, "no name taken from a bogus offset");
+        // random garbage
+        let mut x: u32 = 12345;
+        for _ in 0..2000 {
+            let mut g = record();
+            for b in g[0x38..].iter_mut() { x = x.wrapping_mul(1_103_515_245).wrapping_add(12345); *b = (x >> 16) as u8; }
+            parse_record(&g, 3, &mut rs);
+            let _ = data_runs(&g, 0x38);
+        }
+    }
+
+    #[test]
+    fn data_runs_decode_and_stay_in_bounds() {
+        let mut r = vec![0u8; 0x80];
+        r[4..8].copy_from_slice(&0x60u32.to_le_bytes());
+        r[0x20..0x22].copy_from_slice(&0x40u16.to_le_bytes());
+        // run 1: 0x10 clusters at LCN 0x1000; run 2: 8 clusters at -0x100 relative
+        r[0x40..0x46].copy_from_slice(&[0x21, 0x10, 0x00, 0x10, 0x00, 0x00]);
+        r[0x43] = 0x10;
+        r[0x40..0x44].copy_from_slice(&[0x21, 0x10, 0x00, 0x10]);
+        r[0x44..0x48].copy_from_slice(&[0x21, 0x08, 0x00, 0xFF]);
+        let runs = data_runs(&r, 0);
+        assert_eq!(runs, vec![(0x1000, 0x10), (0x1000 - 0x100, 8)]);
+        let mut bad = r.clone();
+        bad[0x40] = 0xFF; // claims 15+15 byte fields
+        assert!(data_runs(&bad, 0).is_empty());
+    }
+}
+} // mod mft
+
+#[cfg(windows)]
+fn main() {
+    mft::main()
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("hoard-mft reads NTFS volumes and only runs on Windows.");
+    std::process::exit(2);
 }

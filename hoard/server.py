@@ -89,7 +89,20 @@ def vol(vid):
     return v
 
 
+def clean_parts(parts):
+    """Validate a path given as a list of names. Every action that touches the disk goes through this,
+    so nothing can step outside the volume ('..'), smuggle in a separator, or address an NTFS stream (':')."""
+    if not isinstance(parts, (list, tuple)):
+        raise ValueError("Bad path.")
+    bad = {"/", "\\", "\0"} | ({":"} if plat.NAME == "windows" else set())
+    for p in parts:
+        if not isinstance(p, str) or p in ("", ".", "..") or any(c in p for c in bad):
+            raise ValueError("Bad path.")
+    return list(parts)
+
+
 def full_path(vid, parts):
+    parts = clean_parts(parts)
     v = vol(vid)
     if v["type"] == "cloud":
         return cloud.remote_path(v, parts)
@@ -136,6 +149,7 @@ def fast_scan(v, st):
 
 def trash_any(vid, parts):
     """Move one item to the Recycle Bin / Trash (or the cloud's own trash). Returns (ok, error)."""
+    parts = clean_parts(parts)
     v = vol(vid)
     if v["type"] == "cloud":
         if not parts:
@@ -550,7 +564,11 @@ def staged_add(items):
     cur = core.read_staged()
     added = 0
     for it in items:
-        vid, parts = it["vol"], list(it["path"])
+        vid = it["vol"]
+        try:
+            parts = clean_parts(it["path"])
+        except ValueError:
+            continue
         if not parts:
             continue
         if any(x["vol"] == vid and x["path"] == parts[:len(x["path"])] for x in cur):
@@ -700,8 +718,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._send(403, {"error": "bad host"})
         name = self.path.split("?")[0].removeprefix("/api/")
-        if name == "bye":
-            LAST_SEEN["bye"] = time.time()
+        if name == "bye":                # sent by navigator.sendBeacon, which can't set headers: token in the body
+            n = int(self.headers.get("Content-Length") or 0)
+            if self.rfile.read(min(n, 200)).decode("utf-8", "replace").strip() == TOKEN:
+                LAST_SEEN["bye"] = time.time()
             return self._send(200, {})
         if self.headers.get("X-Token") != TOKEN:
             return self._send(403, {"error": "bad token"})
