@@ -42,7 +42,10 @@ The app only listens on `127.0.0.1` and every request needs a per-launch token. 
 - **Online-only files** (OneDrive, iCloud, Google Drive for desktop placeholders) are counted separately, so the map shows what's really on the disk.
 
 ### Simple mode and the map's detail level
-Hoard opens in **Simple mode**: how full the drive is, one-click safe cleanup, what kinds of files use the space, the biggest folders, big files untouched for a year, and what grew. Switch it off for the full map; the map's **Detail** control (Low / Medium / High) starts at Low, a few dozen large blocks.
+Hoard opens in **Simple mode**: how full the drive is, one-click safe cleanup of caches and temporary files (the Recycle Bin is a separate, deliberate step), what kinds of files use the space, the biggest folders, big files of yours untouched for a year (never system, program or app files), and what grew. **Show on map** or **Explore the full map** opens the map with a **Back to Simple view** button; switch Simple off to start in the map. The map's **Show** control (Big items / More / Everything) starts at Big items, a few dozen large blocks.
+
+### Keyboard
+On the map: **arrow keys** move between blocks, **Enter** opens a folder, **Backspace** goes up, **S** marks the selection for removal, **Space** previews a file, **Del** moves it to the Recycle Bin/Trash, **Shift+F10** opens the options menu. **1–4** switch views, **Ctrl+F** searches. In the side lists, **Enter** opens a folder and the arrow keys move between the tabs.
 
 ### Automatic helpers (Settings)
 - **Low-space warnings** when a drive drops below a % or GB you choose (after the daily check, or from the tray).

@@ -15,19 +15,21 @@
   --frame-2: #d8d6ce;
   --ink: #0b0b0b;
   --ink-2: #52514e;
-  --ink-3: #898781;
+  --ink-3: #6b6963;
   --line: #e1e0d9;
   --line-2: #c3c2b7;
   --hover: rgba(11,11,11,.05);
-  --accent: #2a78d6;
-  --accent-soft: rgba(42,120,214,.12);
+  --accent: #2068c4;
+  --accent-solid: #2068c4;
+  --accent-soft: rgba(32,104,196,.12);
   --danger: #c23434;
+  --danger-solid: #c23434;
   --danger-soft: rgba(208,59,59,.10);
   --grow: #b9481c;
   --shrink: #006300;
   --ring: #0b0b0b;
-  --c0: #2a78d6; --c1: #eb6834; --c2: #1baf7a; --c3: #eda100; --c4: #e87ba4;
-  --c5: #008300; --c6: #6250d6; --c7: #e34948; --c8: #b4b2aa;
+  --c0: #2068c4; --c1: #eb6834; --c2: #7f8ea0; --c3: #eda100; --c4: #e87ba4;
+  --c5: #008300; --c6: #6250d6; --c7: #0f9fb0; --c8: #b4b2aa;
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.12);
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "Ubuntu", "Cantarell", "Noto Sans", sans-serif;
   --mono: "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, "Ubuntu Mono", "DejaVu Sans Mono", ui-monospace, monospace;
@@ -38,13 +40,13 @@
     color-scheme: dark;
     --page: #0d0d0d; --surface: #1a1a19; --surface-2: #151514;
     --frame-1: #262625; --frame-2: #30302e;
-    --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #898781;
+    --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #9a9890;
     --line: #2c2c2a; --line-2: #383835; --hover: rgba(255,255,255,.05);
-    --accent: #3987e5; --accent-soft: rgba(57,135,229,.16);
-    --danger: #e66767; --danger-soft: rgba(230,103,103,.12);
+    --accent: #3987e5; --accent-solid: #2b6ccc; --accent-soft: rgba(57,135,229,.16);
+    --danger: #e66767; --danger-solid: #c24040; --danger-soft: rgba(230,103,103,.12);
     --grow: #ec835a; --shrink: #0ca30c; --ring: #ffffff;
-    --c0: #3987e5; --c1: #d95926; --c2: #199e70; --c3: #c98500; --c4: #d55181;
-    --c5: #008300; --c6: #9085e9; --c7: #e66767; --c8: #55544f;
+    --c0: #3987e5; --c1: #d95926; --c2: #5d6b7c; --c3: #c98500; --c4: #d55181;
+    --c5: #008300; --c6: #9085e9; --c7: #1aa6b5; --c8: #55544f;
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 16px 40px rgba(0,0,0,.5);
   }
 }
@@ -52,13 +54,13 @@
   color-scheme: dark;
   --page: #0d0d0d; --surface: #1a1a19; --surface-2: #151514;
   --frame-1: #262625; --frame-2: #30302e;
-  --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #898781;
+  --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #9a9890;
   --line: #2c2c2a; --line-2: #383835; --hover: rgba(255,255,255,.05);
-  --accent: #3987e5; --accent-soft: rgba(57,135,229,.16);
-  --danger: #e66767; --danger-soft: rgba(230,103,103,.12);
+  --accent: #3987e5; --accent-solid: #2b6ccc; --accent-soft: rgba(57,135,229,.16);
+  --danger: #e66767; --danger-solid: #c24040; --danger-soft: rgba(230,103,103,.12);
   --grow: #ec835a; --shrink: #0ca30c; --ring: #ffffff;
-  --c0: #3987e5; --c1: #d95926; --c2: #199e70; --c3: #c98500; --c4: #d55181;
-  --c5: #008300; --c6: #9085e9; --c7: #e66767; --c8: #55544f;
+  --c0: #3987e5; --c1: #d95926; --c2: #5d6b7c; --c3: #c98500; --c4: #d55181;
+  --c5: #008300; --c6: #9085e9; --c7: #1aa6b5; --c8: #55544f;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 16px 40px rgba(0,0,0,.5);
 }
 
@@ -120,11 +122,11 @@ header {
 .btn:hover { background: var(--hover); }
 .btn:active { transform: scale(.97); }
 .btn:disabled { opacity: .5; cursor: default; transform: none; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.primary:hover { filter: brightness(1.08); background: var(--accent); }
+.btn.primary { background: var(--accent-solid); border-color: var(--accent-solid); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); background: var(--accent-solid); }
 .btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .btn.danger:hover { background: var(--danger-soft); }
-.btn.danger.solid { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn.danger.solid { background: var(--danger-solid); color: #fff; border-color: var(--danger-solid); }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.ghost:hover { background: var(--hover); }
 .btn svg { width: 15px; height: 15px; flex: none; }
@@ -287,7 +289,7 @@ dialog .row-actions { display: flex; justify-content: flex-end; gap: 8px; margin
   background: var(--ink); color: var(--surface); box-shadow: var(--shadow); animation: up .2s ease-out;
 }
 .toast small { display: block; opacity: .75; }
-.toast.error { background: var(--danger); color: #fff; }
+.toast.error { background: var(--danger-solid); color: #fff; }
 
 /* ---------- scan chip (minimized scan) */
 .scanchip {
@@ -388,7 +390,7 @@ dialog.wide { width: min(580px, calc(100% - 32px)); max-height: calc(100vh - 48p
 .stagebtn svg { width: 16px; height: 16px; }
 .stagebtn b { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--line); color: var(--ink-2); font-size: 11px; display: inline-grid; place-items: center; }
 .stagebtn.has { border-style: solid; border-color: color-mix(in srgb, var(--danger) 45%, transparent); color: var(--ink); }
-.stagebtn.has b { background: var(--danger); color: #fff; }
+.stagebtn.has b { background: var(--ink); color: var(--surface); }
 .stagebtn.drop { border-color: var(--accent); background: var(--accent-soft); transform: scale(1.06); }
 .stagebtn.bump { animation: bump .35s ease-out; }
 @keyframes bump { 40% { transform: scale(1.12) } }
@@ -541,8 +543,21 @@ main[hidden], .toolbar[hidden], .tabs button[hidden] { display: none; }
 .simpletoggle input:checked + .sw { background: var(--accent); }
 .simpletoggle input:checked + .sw::after { transform: translateX(14px); }
 .simpletoggle input:focus-visible + .sw { outline: 2px solid var(--accent); outline-offset: 2px; }
-body.simple .views { display: none; }
-.simple-wrap { max-width: 860px; margin: 0 auto; padding: 28px 24px 60px; display: grid; gap: 16px; }
+body.simple .views, body.simple #scanBtn { display: none; }
+.simple-wrap { max-width: 1120px; margin: 0 auto; padding: 24px 24px 60px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 1000px) {
+  .simple-wrap { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; }
+  .simple-wrap > .hero, .simple-wrap > .wide { grid-column: 1 / -1; }
+}
+.hero .meterlabel { grid-column: 1 / -1; display: flex; justify-content: space-between; margin-top: -10px; font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.scard details { margin-top: 2px; }
+.scard summary { cursor: pointer; color: var(--ink-2); padding: 8px 0 2px; font-size: 12.5px; list-style: none; }
+.scard summary::-webkit-details-marker { display: none; }
+.scard summary::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 8px 2px 2px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform .15s; }
+.scard details[open] summary::before { transform: rotate(45deg); }
+.simple-foot { display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--ink-2); padding-top: 4px; }
+#backSimple { display: none; }
+body.from-simple:not(.simple) #backSimple { display: inline-flex; }
 .scard { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 22px 24px; }
 .scard h3 { margin: 0 0 4px; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
 .scard .sub { color: var(--ink-2); margin: 0 0 14px; }
@@ -591,6 +606,13 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
   aside { border-left: 0; border-top: 1px solid var(--line); }
   .hstatus #status { display: none; }
 }
+/* ---- accessibility helpers ---- */
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.tabs .tablist { display: contents; }
+.tabs button:focus-visible, #drives button:focus-visible, #crumbs button:focus-visible { outline-offset: -2px; }  /* these rows clip overflow */
+#ov:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 6px; }
+::selection { background: var(--accent-soft); color: var(--ink); }
+
 /* ---- animations (Lottie via the bundled dotLottie player; CSS for the small loader) ---- */
 #splash { position: fixed; inset: 0; z-index: 100; display: grid; place-content: center; justify-items: center; gap: 10px;
   background: var(--page); transition: opacity .35s ease, visibility .35s; }
@@ -635,7 +657,7 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
     <svg width="22" height="22" viewBox="10 9 44 46" aria-hidden="true"><rect x="11" y="10" width="15" height="44" rx="4" fill="#3d8bf2"/><rect x="38" y="10" width="15" height="21" rx="4" fill="#ef6b3a"/><rect x="38" y="34" width="15" height="20" rx="4" fill="#22b07d"/><rect x="28.5" y="26" width="7" height="12" rx="2.5" fill="#f5c44a"/></svg>
     Hoard
   </div>
-  <div class="views" role="tablist" aria-label="Views">
+  <div class="views" role="group" aria-label="Views">
     <button data-view="map" aria-pressed="true" title="Map (1)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="2" width="7" height="12" rx="1.5"/><rect x="10" y="2" width="4.5" height="6.5" rx="1.2"/><rect x="10" y="10" width="4.5" height="4" rx="1.2"/></svg><span>Map</span></button>
     <button data-view="cleanup" aria-pressed="false" title="Clean up (2)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2 6 8.5M3.5 8.5h7l-1 6h-5z M5.5 11.5v3M8.5 11.5v3"/></svg><span>Clean up</span></button>
     <button data-view="dupes" aria-pressed="false" title="Duplicates (3)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg><span>Duplicates</span></button>
@@ -664,13 +686,16 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
 </header>
 
 <div class="toolbar">
+  <button class="btn" id="backSimple" title="Back to the Simple view">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg><span>Back to Simple view</span>
+  </button>
   <button class="btn" id="up" title="Up one level (Backspace)" aria-label="Up one level" disabled>
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>
   </button>
   <div id="crumbs"></div>
-  <div class="detail" role="group" aria-label="Map detail" title="How much detail the map shows">
-    <span>Detail</span>
-    <button data-detail="low">Low</button><button data-detail="medium">Medium</button><button data-detail="high">High</button>
+  <div class="detail" role="group" aria-label="How many blocks the map shows" title="How many blocks the map shows">
+    <span>Show</span>
+    <button data-detail="low" title="Only the big things: a few dozen blocks">Big items</button><button data-detail="medium" title="Big and medium folders and files">More</button><button data-detail="high" title="Everything down to small files">Everything</button>
   </div>
   <div class="search" id="searchBox">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg>
@@ -696,34 +721,38 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
 <main>
   <div id="map" aria-label="Disk space map">
     <canvas id="cv"></canvas>
-    <canvas id="ov" role="img" aria-label="Treemap of folder sizes. The list in the side panel shows the same data."></canvas>
+    <canvas id="ov" tabindex="0" role="application" aria-roledescription="disk map" aria-describedby="mapHelp" aria-label="Disk map"></canvas>
+    <p id="mapHelp" class="sr">Arrow keys move between blocks. Enter opens a folder, Backspace goes up, S marks the block for removal, Shift+F10 shows options. The list in the side panel shows the same items.</p>
+    <p id="mapLive" class="sr" aria-live="polite"></p>
     <div id="maptip" hidden>
       <b>How to read the map</b>
       <span>Every block is a folder or file. The bigger the block, the more space it uses. Colours show the kind of file.</span>
-      <span><b>Double-click</b> a folder to look inside · <b>Backspace</b> to go back · <b>right-click</b> for options.</span>
+      <span><b>Double-click</b> a folder to look inside · <b>Backspace</b> to go back · <b>right-click</b> for options. With the keyboard, Tab to the map and use the <b>arrow keys</b> and <b>Enter</b>.</span>
       <button class="btn primary" id="maptipOk">Got it</button>
     </div>
     <div id="state"></div>
   </div>
   <aside>
-    <section id="sel" aria-live="polite"></section>
+    <section id="sel"></section>
     <section id="comp"></section>
-    <div class="tabs" role="tablist">
-      <button role="tab" data-tab="contents" aria-selected="true">Contents</button>
-      <button role="tab" data-tab="files" aria-selected="false">Largest</button>
-      <button role="tab" data-tab="changes" aria-selected="false">What grew</button>
-      <button role="tab" data-tab="types" aria-selected="false">Types</button>
-      <button role="tab" data-tab="search" aria-selected="false" hidden>Results</button>
+    <div class="tabs">
+      <div class="tablist" role="tablist" aria-label="Lists">
+        <button role="tab" id="tab-contents" aria-controls="list" data-tab="contents" aria-selected="true">Contents</button>
+        <button role="tab" id="tab-files" aria-controls="list" data-tab="files" aria-selected="false" tabindex="-1">Largest</button>
+        <button role="tab" id="tab-changes" aria-controls="list" data-tab="changes" aria-selected="false" tabindex="-1">What grew</button>
+        <button role="tab" id="tab-types" aria-controls="list" data-tab="types" aria-selected="false" tabindex="-1">Types</button>
+        <button role="tab" id="tab-search" aria-controls="list" data-tab="search" aria-selected="false" tabindex="-1" hidden>Results</button>
+      </div>
       <span class="spacer"></span>
       <button class="tbtn" id="exportBtn" title="Export this list as CSV, or save a report">Export</button>
     </div>
-    <div id="list" role="tabpanel"></div>
+    <div id="list" role="tabpanel" aria-labelledby="tab-contents"></div>
   </aside>
 </main>
 <section id="panel" hidden></section>
 
-<aside id="drawer" aria-label="Removal list" aria-hidden="true">
-  <header><h3>Removal list</h3><button class="btn ghost icon" id="drawerClose" aria-label="Close">✕</button></header>
+<aside id="drawer" role="dialog" aria-labelledby="drawerTitle" aria-hidden="true">
+  <header><h3 id="drawerTitle">Removal list</h3><button class="btn ghost icon" id="drawerClose" aria-label="Close the removal list"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></header>
   <div class="dbody" id="drawerBody"></div>
   <div class="dfoot" id="drawerFoot"></div>
 </aside>
@@ -846,10 +875,21 @@ function ageBucket(t) {
 }
 const agePalette = () => (document.documentElement.dataset.theme === "dark" || (document.documentElement.dataset.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches)) ? AGE_DARK : AGE_LIGHT;
 function fillFor(n) { return S.colorBy === "age" ? agePalette()[ageBucket(n.a)] : C.cats[n.c]; }
-function inkOn(n) {
-  if (S.colorBy === "age") { const b = ageBucket(n.a); return b <= 1 || b === 5 ? "#0b0b0b" : "#ffffff"; }
-  return n.c === 3 ? "#0b0b0b" : "#ffffff";
+/* label ink for a block: whichever of white or near-black reads better on its fill (WCAG contrast) */
+const inkCache = new Map();
+function inkFor(color) {
+  if (inkCache.has(color)) return inkCache.get(color);
+  const m = /^#?([0-9a-f]{6})$/i.exec(color.trim()) || null;
+  let ink = "#ffffff";
+  if (m) {
+    const [r, g, b] = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16) / 255).map(c => c <= .03928 ? c / 12.92 : ((c + .055) / 1.055) ** 2.4);
+    const L = .2126 * r + .7152 * g + .0722 * b;
+    ink = (1.05 / (L + .05)) >= ((L + .05) / .0583) ? "#ffffff" : "#141413";   // .0583 = luminance of #141413 + .05
+  }
+  inkCache.set(color, ink);
+  return ink;
 }
+function inkOn(n) { return inkFor(fillFor(n)); }
 function isDim(n) {
   if (S.focusCat === null) return false;
   if (n.k === "o") return true;
@@ -1089,6 +1129,43 @@ ov.addEventListener("click", e => {
   setSel(r && r.path ? { path: r.path, node: r.n } : null);
 });
 ov.addEventListener("dblclick", e => { const r = hit(e); if (r && r.n.k === "d") zoomInto(r.path, r); });
+/* keyboard: arrows move to the nearest block in that direction (siblings first), Shift+F10 / the menu key opens options */
+ov.addEventListener("keydown", e => {
+  if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+    if (!S.sel) return;
+    e.preventDefault();
+    const r = selRect(), b = ov.getBoundingClientRect();
+    openMenu(b.left + (r ? r.x + 16 : 24), b.top + (r ? r.y + 16 : 24), S.sel.path, S.sel.node, true);
+    return;
+  }
+  const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+  if (!d || e.altKey || e.metaKey || e.ctrlKey) return;
+  e.preventDefault();
+  const cands = S.rects.filter(r => r.path && r.depth >= 1 && r.w >= 6 && r.h >= 6);
+  if (!cands.length) return;
+  const cur = selRect();
+  if (!cur) {
+    const first = cands.filter(r => r.depth === 1).sort((a, b) => b.w * b.h - a.w * a.h)[0] || cands[0];
+    return setSel({ path: first.path, node: first.n });
+  }
+  const cx = cur.x + cur.w / 2, cy = cur.y + cur.h / 2;
+  const inside = (r, x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  let best = null, bestScore = Infinity;
+  for (const r of cands) {
+    const rx = r.x + r.w / 2, ry = r.y + r.h / 2;
+    if (r === cur || inside(r, cx, cy) || inside(cur, rx, ry)) continue;     // skip the folders around it and inside it
+    const dx = rx - cx, dy = ry - cy, along = dx * d[0] + dy * d[1];
+    if (along <= 1) continue;
+    const score = along + Math.abs(dx * d[1] + dy * d[0]) * 2 + Math.abs(r.depth - cur.depth) * 60;
+    if (score < bestScore) { bestScore = score; best = r; }
+  }
+  if (best) setSel({ path: best.path, node: best.n });
+});
+function announceSel() {
+  if (document.activeElement !== ov) return;
+  const n = S.sel?.node;
+  $("#mapLive").textContent = !n ? "" : `${n.n}, ${n.k === "d" ? "folder" : n.k === "f" ? CATN[n.c] + " file" : "small items"}, ${fmt(n.s)}${S.view?.s ? `, ${Math.max(.1, n.s / S.view.s * 100).toFixed(1)} percent of this folder` : ""}`;
+}
 ov.addEventListener("contextmenu", e => {
   e.preventDefault();
   const r = hit(e);
@@ -1143,7 +1220,7 @@ function jumpTo(item) {
     setSel({ path: item.p, node: c || node });
   } else loadView(parent, { select: name, fallback: node });
 }
-function setSel(sel) { S.sel = sel; drawOverlay(); renderSel(); markRows(); }
+function setSel(sel) { S.sel = sel; drawOverlay(); renderSel(); markRows(); announceSel(); }
 
 /* ------------------------------------------------------------------ rendering: chrome */
 function renderAll() { renderDrives(); renderStatus(); renderCrumbs(); renderSel(); renderComp(); renderList(); }
@@ -1197,7 +1274,7 @@ function renderCrumbs() {
   if (S.meta.partial) html += `<span class="chip note" title="This came from an earlier summary scan. Rescan for every folder and file.">Summary scan · rescan for full detail</span>`;
   const hist = S.hist?.items || [];
   if (hist.length > 1) {
-    html += `<label class="cmp" title="Which earlier scan to compare with">vs <select id="cmpSel">${hist.slice(1).map(h =>
+    html += `<label class="cmp" title="Growth (What grew, the ▲ marks) is measured against this earlier scan">Compared with <select id="cmpSel">${hist.slice(1).map(h =>
       `<option value="${h.ts}" ${h.ts === S.meta.prevTime ? "selected" : ""}>${esc(when(h.ts))}${h.total ? " · " + fmt(h.total) : ""}${h.partial ? " (summary)" : ""}</option>`).join("")}</select></label>`;
   }
   if (S.view.ign) html += `<button class="chip note" id="ignChip" style="border:0;cursor:pointer" title="Folders on your ignore list are left out of the map and lists. Manage them in Settings.">${fmt(S.view.ign)} ignored</button>`;
@@ -1321,10 +1398,22 @@ async function loadAges() {
 
 /* ------------------------------------------------------------------ side lists */
 document.querySelectorAll(".tabs [role=tab]").forEach(b => b.onclick = () => selectTab(b.dataset.tab));
-function selectTab(t) {
+$(".tablist").addEventListener("keydown", e => {         // arrow keys move between tabs (roving focus)
+  const tabs = [...document.querySelectorAll(".tabs [role=tab]:not([hidden])")], i = tabs.indexOf(document.activeElement);
+  const j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : null;
+  if (j === null || i < 0) return;
+  e.preventDefault();
+  const t = tabs[(j + tabs.length) % tabs.length];
+  t.focus(); selectTab(t.dataset.tab);
+});
+function selectTab(t, render = true) {
   S.tab = t;
-  document.querySelectorAll(".tabs [role=tab]").forEach(x => x.setAttribute("aria-selected", x.dataset.tab === t));
-  renderList();
+  document.querySelectorAll(".tabs [role=tab]").forEach(x => {
+    const on = x.dataset.tab === t;
+    x.setAttribute("aria-selected", on); x.tabIndex = on ? 0 : -1;
+  });
+  $("#list").setAttribute("aria-labelledby", "tab-" + t);
+  if (render) renderList();
 }
 function rowHTML(item, i, max, opts = {}) {
   const color = item.k === "o" ? "var(--c8)" : `var(--c${item.c})`;
@@ -1377,6 +1466,13 @@ async function renderList() {
     if (tab === "contents") {
       row.onclick = () => setSel({ path: S.path.concat(it.n), node: it });
       row.ondblclick = () => { if (it.k === "d") zoomInto(S.path.concat(it.n), S.rects.find(r => r.depth === 1 && r.n === it)); };
+      row.onkeydown = e => {                  // Enter opens a folder (a click only selects it); Shift+F10 shows options
+        if (e.key === "Enter" && it.k === "d") { e.preventDefault(); row.ondblclick(); }
+        if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+          e.preventDefault(); const b = row.getBoundingClientRect();
+          setSel({ path: S.path.concat(it.n), node: it }); openMenu(b.left + 24, b.bottom - 4, S.path.concat(it.n), it, true);
+        }
+      };
       row.oncontextmenu = e => { e.preventDefault(); setSel({ path: S.path.concat(it.n), node: it }); openMenu(e.clientX, e.clientY, S.path.concat(it.n), it); };
     } else {
       row.onclick = () => jumpTo(it);
@@ -1489,7 +1585,7 @@ function confirmRecycle(path, n) {
     <div class="row-actions"><button class="btn" value="cancel" autofocus>Cancel</button><button class="btn danger solid" value="ok">${ICON.trash}Move to ${binH}</button></div>`;
   d.querySelector('[value="cancel"]').onclick = () => d.close();
   d.querySelector('[value="ok"]').onclick = async e => {
-    const b = e.currentTarget; b.disabled = true; b.innerHTML = `<div class="spinner" style="width:14px;height:14px;border-color:rgba(255,255,255,.4);border-top-color:#fff"></div>Moving…`;
+    const b = e.currentTarget; b.disabled = true; b.innerHTML = `${SPIN}Moving…`;
     try {
       const r = await api("recycle", { drive: S.drive, path });
       d.close();
@@ -1535,6 +1631,7 @@ addEventListener("blur", closeMenu);
 /* keyboard */
 addEventListener("keydown", e => {
   if ($("#dlg").open) return;
+  if (e.key === "Escape" && $("#drawer").contains(e.target)) return toggleDrawer(false);
   const typing = e.target.matches?.("input, select, textarea");
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); if (S.mode !== "map") setMode("map"); $("#q").focus(); $("#q").select(); return; }
   if (typing) return;
@@ -1574,7 +1671,15 @@ function toast(msg, kind = "ok", sub = "", action = null) {
     t.appendChild(b);
   }
   $("#toasts").appendChild(t);
-  setTimeout(() => { t.style.transition = "opacity .3s"; t.style.opacity = 0; setTimeout(() => t.remove(), 300); }, action ? 9000 : kind === "error" ? 7000 : 4200);
+  // toasts with an action or an error wait while you're pointing at or tabbed into them
+  let left = action ? 9000 : kind === "error" ? 9000 : 4200, held = false, timer = 0, start = 0;
+  const fade = () => { t.style.transition = "opacity .3s"; t.style.opacity = 0; setTimeout(() => t.remove(), 300); };
+  const run = () => { start = Date.now(); timer = setTimeout(fade, left); };
+  const hold = () => { if (held) return; held = true; clearTimeout(timer); left = Math.max(1500, left - (Date.now() - start)); };
+  const release = () => { if (!held || t.matches(":hover, :focus-within")) return; held = false; run(); };
+  t.addEventListener("mouseenter", hold); t.addEventListener("focusin", hold);
+  t.addEventListener("mouseleave", release); t.addEventListener("focusout", () => setTimeout(release));
+  run();
 }
 
 /* ------------------------------------------------------------------ overlay states */
@@ -1597,15 +1702,15 @@ function showState(kind, data) {
       <button class="btn primary" id="emptyScan">Scan ${vn}</button></div>`;
     $("#emptyScan").onclick = startScan;
   } else if (kind === "scan") {
-    stateEl.innerHTML = `<div class="card" role="status">
-      <div class="h">${S.scanFast ? "Fast scan of" : "Scanning"} ${vn}</div>
+    stateEl.innerHTML = `<div class="card">
+      <div class="h" role="status">${S.scanFast ? "Fast scan of" : "Scanning"} ${vn}</div>
       ${S.scanFast ? `<p style="margin:4px 0 0;font-size:12.5px">Windows asks for administrator permission to read the file table directly. Say no and Hoard scans the normal way.</p>` : ""}
       ${isCloudVol() ? `<p style="margin:4px 0 0;font-size:12.5px">Listing every file through rclone. Nothing is downloaded; big drives take a few minutes.</p>` : ""}
       <div class="scananim lot" id="scAnim" aria-hidden="true"></div>
       <div class="big num"><span id="scBytes">0 B</span><span class="of" id="scOf"></span></div>
-      <div class="progress" id="scBar"><i></i></div>
+      <div class="progress" id="scBar" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100"><i></i></div>
       <div class="scanmeta num"><span id="scFiles">Starting…</span><span id="scTime"></span></div>
-      <div class="ticker" id="scCur"><span></span></div>
+      <div class="ticker" id="scCur" aria-hidden="true"><span></span></div>
       <div class="row-actions">
         ${S.view ? `<button class="btn primary" id="scHide" title="Keep scanning in the background and use the map">Hide</button>` : ""}
         <button class="btn" id="scCancel">Cancel scan</button>
@@ -1637,6 +1742,7 @@ function updateScanUI(p) {
   targetBytes = p.bytes; if (!rafId) rafId = requestAnimationFrame(animateBytes);
   $("#scOf").textContent = p.used ? ` of ~${fmt(p.used)}` : "";
   $("#scBar i").style.width = pct + "%";
+  if (p.used) $("#scBar").setAttribute("aria-valuenow", Math.round(pct)); else $("#scBar").removeAttribute("aria-valuenow");
   scanAnimTo(pct, !!p.used);
   $("#scFiles").textContent = p.cancelled ? "Stopping…" : `${p.files.toLocaleString()} files`;
   const s = Math.round(p.elapsed); $("#scTime").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -1688,7 +1794,7 @@ async function poll() {
     toast(`Scanned ${vol().name} in ${Math.round(p.elapsed)} s`, "ok", `${p.files.toLocaleString()} files, ${fmt(p.bytes)}${p.errors ? ` · ${p.errors.toLocaleString()} items couldn't be read` : ""}`);
     S.meta = await api("open_drive", { drive: S.drive });
     refreshDrives();
-    if (S.meta.prevTime) { S.tab = "changes"; document.querySelectorAll(".tabs button").forEach(x => x.setAttribute("aria-selected", x.dataset.tab === "changes")); }
+    if (S.meta.prevTime) selectTab("changes", false);
     await loadHistory();
     await loadView([]);
     return;
@@ -1729,6 +1835,9 @@ const Anim = (() => {
 /* every spinner becomes the logo's breathing blocks (pure CSS, so lists that re-render often stay cheap) */
 function upgradeSpinners(root) {
   root.querySelectorAll?.(".spinner:not(.hl):not([style])").forEach(s => { s.classList.add("hl"); s.innerHTML = "<i></i><i></i><i></i><i></i>"; });
+  // icons inside labelled controls are decoration: keep them out of what screen readers announce
+  root.querySelectorAll?.("button svg:not([aria-hidden]), .views svg:not([aria-hidden]), .search > svg:not([aria-hidden])")
+    .forEach(s => s.setAttribute("aria-hidden", "true"));
 }
 upgradeSpinners(document);
 new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) {
@@ -1834,6 +1943,7 @@ function renderStageBtn() {
   $("#stageBtn").classList.toggle("has", n > 0);
   $("#stageCount").textContent = n;
   $("#stageLabel").textContent = n ? `${fmt(S.staged.total)} to remove` : "Removal list";
+  $("#stageBtn").setAttribute("aria-label", n ? `Removal list: ${n} item${n > 1 ? "s" : ""}, ${fmt(S.staged.total)}` : "Removal list, empty");
 }
 function bump() { const b = $("#stageBtn"); b.classList.remove("bump"); void b.offsetWidth; b.classList.add("bump"); }
 async function stage(items, absItems, vid = S.drive) {
@@ -1847,13 +1957,23 @@ async function stage(items, absItems, vid = S.drive) {
     if ($("#drawer").classList.contains("open")) renderDrawer();
   } catch (e) { toast(e.message, "error"); }
 }
+let drawerReturn = null;
 function toggleDrawer(open) {
   const d = $("#drawer");
-  open = open ?? !d.classList.contains("open");
+  const was = d.classList.contains("open");
+  open = open ?? !was;
   d.classList.toggle("open", open);
   d.setAttribute("aria-hidden", String(!open));
-  if (open) renderDrawer();
+  d.inert = !open;
+  if (open) {
+    renderDrawer();
+    if (!was) { drawerReturn = document.activeElement; setTimeout(() => $("#drawerClose").focus(), 0); }
+  } else if (was) {
+    const back = drawerReturn?.isConnected ? drawerReturn : $("#stageBtn");
+    back.focus?.(); drawerReturn = null;
+  }
 }
+$("#drawer").inert = true;
 $("#stageBtn").onclick = () => toggleDrawer();
 $("#drawerClose").onclick = () => toggleDrawer(false);
 function renderDrawer() {
@@ -1864,7 +1984,7 @@ function renderDrawer() {
   }
   body.innerHTML = items.map((it, i) => `<div class="sitem"><i style="background:var(--c${it.c})"></i>
       <span class="sn" title="${esc(it.name)}">${esc(it.name)}</span><span class="sz">${fmt(it.size)}</span>
-      <button class="xbtn" data-i="${i}" title="Take it off the removal list (keeps the file)" aria-label="Take off the list">✕</button>
+      <button class="xbtn" data-i="${i}" title="Take it off the removal list (keeps the file)" aria-label="Take ${esc(it.name)} off the list"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
       <span class="sp" title="${esc(absPath(it.vol, it.path))}"><span>${esc(absPath(it.vol, it.path))}</span></span>
       ${it.error ? `<span class="err">${esc(it.error)}</span>` : ""}</div>`).join("");
   body.querySelectorAll(".xbtn").forEach(b => b.onclick = async () => {
@@ -2382,7 +2502,7 @@ function appRow(a) {
   const size = a.size ? `${fmt(a.size)}<small>${a.sizeFrom === "scan" ? "measured" : "estimated by the app"}</small>` : `<small>size unknown</small>`;
   const un = a.uninstall === "command"
     ? `<button class="btn" data-copy-cmd="${esc(a.cmd)}" onclick="copyText(this.dataset.copyCmd).then(ok => toast(ok ? 'Command copied' : 'Couldn\\'t copy', 'ok', 'Run it in a terminal.'))">${ICON.copy}Copy uninstall command</button>`
-    : `<button class="btn danger" data-un="${a.id}">${ICON.trash}Uninstall</button>`;
+    : `<button class="btn" data-un="${a.id}" aria-label="Uninstall ${esc(a.name)}">Uninstall</button>`;   /* red only at the confirmation */
   const rel = S.appOpen[a.id];
   let relHTML = "";
   if (rel === "loading") relHTML = `<div class="cands"><div class="loading">${SPIN}Looking for related folders…</div></div>`;
@@ -2455,10 +2575,12 @@ try { if (localStorage.getItem("hoard.noside") === "1") setSide(true); } catch {
 function renderDetail() { document.querySelectorAll("[data-detail]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.detail === S.detail))); }
 document.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => {
   if (S.detail === b.dataset.detail) return;
+  const before = S.detail;
   S.detail = b.dataset.detail;
-  try { localStorage.setItem("hoard.detail", S.detail); } catch { /* private mode */ }
   renderDetail();
-  if (S.view) loadView(S.path, { force: true });
+  const keep = () => { try { localStorage.setItem("hoard.detail", S.detail); } catch { /* private mode */ } };
+  if (!S.view) return keep();
+  loadView(S.path, { force: true }).then(keep, () => { S.detail = before; renderDetail(); });   // don't claim a level that didn't load
 });
 renderDetail();
 function maybeTip() {
@@ -2469,14 +2591,17 @@ function maybeTip() {
 $("#maptipOk").onclick = () => { try { localStorage.setItem("hoard.tipSeen", "1"); } catch { /* */ } $("#maptip").hidden = true; };
 
 /* ------------------------------------------------------------------ simple mode */
-function setSimple(on) {
+/* visit = a look at the map from Simple view: it isn't remembered, and "Back to Simple view" returns */
+function setSimple(on, { visit = false } = {}) {
   S.simple = on;
   $("#simpleSw").checked = on;
   document.body.classList.toggle("simple", on);
-  try { localStorage.setItem("hoard.simple", on ? "1" : "0"); } catch { /* private mode */ }
+  document.body.classList.toggle("from-simple", !on && visit);
+  if (!visit) { try { localStorage.setItem("hoard.simple", on ? "1" : "0"); } catch { /* private mode */ } }
   setMode(on ? "simple" : "map");
 }
 $("#simpleSw").onchange = e => setSimple(e.target.checked);
+$("#backSimple").onclick = () => setSimple(true);
 function meaningfulFolders(view, limit = 6) {
   const out = [], tot = view.s || 1;
   (function rec(n, path, depth) {
@@ -2504,9 +2629,10 @@ async function renderSimple() {
       <div style="color:var(--ink-3);font-weight:600">${esc(d.name)} ${esc(d.type === "cloud" ? "" : d.label || "")}</div>
       <div class="free num">${d.total ? fmt(d.free) : fmt(S.view?.s || 0)} <small>${d.total ? `free of ${fmt(d.total)}` : "in use"}</small></div>
       ${d.total ? `<div class="verdict ${cls}">${verdict}</div>` : ""}</div>
-      <div style="text-align:right"><button class="btn primary bigbtn" id="simpleScan" ${S.scanning ? "disabled" : ""}>${S.scanning ? "Checking…" : S.meta?.has ? "Check again" : "Check this drive"}</button>
+      <div style="text-align:right"><button class="btn ${S.meta?.has ? "" : "primary"} bigbtn" id="simpleScan" ${S.scanning ? "disabled" : ""}>${S.scanning ? "Checking…" : S.meta?.has ? "Check again" : "Check this drive"}</button>
         <div style="font-size:12px;color:var(--ink-3);margin-top:6px">${S.scanning ? "This takes a minute or less" : checked}</div></div>
-      ${d.total ? `<div class="meter"><i class="${cls}" style="width:${(pct * 100).toFixed(1)}%"></i></div>` : ""}</div>`;
+      ${d.total ? `<div class="meter" role="img" aria-label="${fmt(d.used)} used, ${fmt(d.free)} free"><i class="${cls}" style="width:${(pct * 100).toFixed(1)}%"></i></div>
+        <div class="meterlabel" aria-hidden="true"><span>${fmt(d.used)} used</span><span>${fmt(d.free)} free</span></div>` : ""}</div>`;
   if (!S.meta?.has || !S.view) {
     p.innerHTML = `<div class="simple-wrap">${hero}<div class="scard"><h3>Let Hoard take a look</h3><p class="sub">Press <b>Check this drive</b>. Hoard reads every folder, nothing is changed, and then shows you what's using the space and what's safe to remove.</p></div></div>`;
     $("#simpleScan").onclick = startScan;
@@ -2524,14 +2650,15 @@ async function renderSimple() {
       ${folders.map((f, k) => `<div class="srow"><span class="n">${esc(f.n)}</span><span class="p">${esc(fullPath(f.p.slice(0, -1)))}</span>
         <span class="s">${fmt(f.s)}</span><span class="a"><button class="btn" data-fshow="${k}">Show on map</button></span></div>`).join("") || `<p class="sub">Nothing stands out.</p>`}</div>
     <div class="scard" id="sOld"><h3>Big files you haven't touched in a year</h3><div class="loading">${SPIN}Looking…</div></div>
-    <div class="scard" id="sGrew"><h3>What grew lately</h3><div class="loading">${SPIN}Comparing…</div></div>
-    <p style="text-align:center;color:var(--ink-3)">Want the full map, duplicates and apps? Switch off <b>Simple</b> at the top.</p></div>`;
+    <div class="scard wide" id="sGrew"><h3>What grew lately</h3><div class="loading">${SPIN}Comparing…</div></div>
+    <div class="simple-foot wide"><span>Want every folder as a map, plus duplicates and apps?</span><button class="btn" id="sFull">Explore the full map</button></div></div>`;
   $("#simpleScan").onclick = startScan;
+  $("#sFull").onclick = () => setSimple(false, { visit: true });
   p.querySelectorAll("[data-fshow]").forEach(b => b.onclick = () => showOnMap(folders[+b.dataset.fshow].p, folders[+b.dataset.fshow]));
   fillSimpleClean(my); fillSimpleOld(my); fillSimpleGrew(my);
 }
 function showOnMap(path, node) {
-  setSimple(false);
+  setSimple(false, { visit: true });
   jumpTo({ p: path, s: node.s, k: node.k || "d", c: node.c, a: node.a, f: node.f });
 }
 async function fillSimpleClean(my) {
@@ -2553,9 +2680,12 @@ async function fillSimpleClean(my) {
   const total = safe.reduce((a, i) => a + i.size, 0);
   const el = $("#sClean");
   if (!el) return;
+  const row = i => `<div class="srow"><span class="n">${esc(i.title)}</span><span class="p">${esc(i.desc)}</span><span class="s">${fmt(i.size)}</span><span class="a"></span></div>`;
+  const byBig = safe.slice().sort((a, b) => b.size - a.size), top = byBig.slice(0, 4), rest = byBig.slice(4);
   el.innerHTML = `<h3>Free up space safely</h3>${total ? `<p class="sub">Temporary files and caches: apps rebuild them when they need them.</p>
-      ${safe.map(i => `<div class="srow"><span class="n">${esc(i.title)}</span><span class="p">${esc(i.desc)}</span><span class="s">${fmt(i.size)}</span><span class="a"></span></div>`).join("")}
-      <div style="margin-top:14px"><button class="btn primary bigbtn" id="sCleanGo">Free up ${fmt(total)}</button></div>`
+      <div style="margin:0 0 6px"><button class="btn primary bigbtn" id="sCleanGo">Free up ${fmt(total)}</button></div>
+      ${top.map(row).join("")}
+      ${rest.length ? `<details><summary>${rest.length} more, ${fmt(rest.reduce((a, i) => a + i.size, 0))}</summary>${rest.map(row).join("")}</details>` : ""}`
     : `<p class="sub">Nothing to clear right now. Your caches and temporary files are already small.</p>`}
     ${bin ? `<div class="srow binrow"><span class="n">${esc(S.trashName)}</span><span class="p">Files you deleted earlier. Emptying it removes them for good; check it first if you're not sure.</span>
       <span class="s">${fmt(bin.size)}</span><span class="a"><button class="btn" id="sBin">Empty…</button></span></div>` : ""}`;
