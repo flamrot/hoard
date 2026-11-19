@@ -185,9 +185,10 @@ def alloc_size(path, logical):
 
 def pin_dir(path, expect=None):
     """Open the folder itself (never what a junction points to) and keep the handle: without delete sharing,
-    nobody can rename, delete or swap it for a junction until unpin_dir(). Checks it's a real folder and,
-    with `expect`, that it's the same one we listed (by file id)."""
-    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES = 0x1, 0x80
+    nobody can rename, delete or swap it for a junction until unpin_dir(). Checks it's a real folder (cloud
+    placeholder folders are reparse points too, but not links: those are fine) and, with `expect`, that it's
+    the same one we listed (by file id)."""
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES = 0x1, 0x80   # a data right: attribute-only handles don't block sharing
     SHARE_READ_WRITE = 0x1 | 0x2                      # deliberately no FILE_SHARE_DELETE
     OPEN_EXISTING = 3
     BACKUP_SEMANTICS, OPEN_REPARSE_POINT = 0x02000000, 0x00200000
@@ -199,14 +200,79 @@ def pin_dir(path, expect=None):
     ok = _k32.GetFileInformationByHandle(h, ctypes.byref(info))
     attrs = info.dwFileAttributes
     idx = (info.nFileIndexHigh << 32) | info.nFileIndexLow
-    if not ok or not attrs & 0x10 or attrs & 0x400 or (expect and idx != expect & 0xFFFFFFFFFFFFFFFF):
+    if not ok or not attrs & 0x10 or (attrs & 0x400 and _is_surrogate(h)) or             (expect and idx != expect & 0xFFFFFFFFFFFFFFFF):
         _k32.CloseHandle(h)
         return None
     return h
 
 
+def _is_surrogate(h):
+    """A name-surrogate reparse point (junction, symlink, mount point): a link. Unknown counts as a link."""
+    tag = (wintypes.DWORD * 2)()                       # FILE_ATTRIBUTE_TAG_INFO: attributes, reparse tag
+    if not _k32.GetFileInformationByHandleEx(h, 9, tag, ctypes.sizeof(tag)):
+        return True
+    return bool(tag[1] & 0x20000000)
+
+
 def unpin_dir(h):
     _k32.CloseHandle(h)
+
+
+_k32.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+_k32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+
+
+_k32.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+_k32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+
+
+def final_path(path, follow=False):
+    """The path Windows reports for the item at `path` (a final link is followed only with `follow`): resolves
+    subst and mapped drives, junctions above it, short names and case. Returns (path or None, Windows error)."""
+    h = _k32.CreateFileW(path, 0, 0x1 | 0x2 | 0x4, None, 3, 0x02000000 | (0 if follow else 0x00200000), None)
+    if h is None or h == _INVALID:
+        return None, ctypes.get_last_error()
+    try:
+        n = 1024
+        while True:
+            buf = ctypes.create_unicode_buffer(n)
+            got = _k32.GetFinalPathNameByHandleW(h, buf, n, 0)
+            if got == 0:
+                return None, ctypes.get_last_error()
+            if got < n:
+                return buf.value, 0
+            n = got + 1
+    finally:
+        _k32.CloseHandle(h)
+
+
+def dir_info(path):
+    """{name: (file id, allocated bytes)} for a whole folder in a few calls. os.scandir leaves file ids out on
+    Windows, and asking per file (DirEntry.inode) costs a file open each. None if the folder can't be read."""
+    import struct
+    h = _k32.CreateFileW(path, 0x1, 0x1 | 0x2 | 0x4, None, 3, 0x02000000, None)   # LIST_DIRECTORY, share all
+    if h is None or h == _INVALID:
+        return None
+    out = {}
+    buf = ctypes.create_string_buffer(64 * 1024)
+    cls = 11                                    # FileIdBothDirectoryRestartInfo, then FileIdBothDirectoryInfo
+    try:
+        while _k32.GetFileInformationByHandleEx(h, cls, buf, len(buf)):
+            cls = 10
+            raw, off = buf.raw, 0
+            while True:
+                # FILE_ID_BOTH_DIR_INFO: NextEntryOffset@0, AllocationSize@48, FileNameLength@60, FileId@96, FileName@104
+                nxt, = struct.unpack_from("<L", raw, off)
+                alloc, = struct.unpack_from("<q", raw, off + 48)
+                nlen, = struct.unpack_from("<L", raw, off + 60)
+                fid, = struct.unpack_from("<Q", raw, off + 96)
+                out[raw[off + 104:off + 104 + nlen].decode("utf-16le", "surrogatepass")] = (fid, alloc)
+                if not nxt:
+                    break
+                off += nxt
+    finally:
+        _k32.CloseHandle(h)
+    return out
 
 
 def schedule_install(hour, minute, argv, elevated=False):

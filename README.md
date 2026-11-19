@@ -44,6 +44,21 @@ The app only listens on `127.0.0.1` and every request needs a per-launch token. 
 ### Simple mode and the map's detail level
 Hoard opens in **Simple mode**: how full the drive is, one-click safe cleanup of caches and temporary files (the Recycle Bin is a separate, deliberate step), what kinds of files use the space, the biggest folders, big files of yours untouched for a year (never system, program or app files), and what grew. **Show on map** or **Explore the full map** opens the map with a **Back to Simple view** button; switch Simple off to start in the map. The map's **Show** control (Big items / More / Everything) starts at Big items, a few dozen large blocks.
 
+### Files (key 5): a dual-pane file manager
+A Midnight Commander-style file manager inside Hoard, with the best of Total Commander, Far and friends:
+- **Two panes:**
+  - tabs per pane (Alt+T/W) and a breadcrumb you can click or type into (Alt+C);
+  - **folder sizes straight from the last scan**, with size bars and **Biggest first**;
+  - Full/Brief listings, hidden files, branch view (Ctrl+B: every file below, flat).
+- **MC keys:**
+  - **F3** view (text/hex, images, video, audio, PDF), **F5** copy, **F6** move (Shift+F6 rename);
+  - **F7** new folder (Shift+F7 new file), **F8** to the Recycle Bin/Trash (Shift+F8 delete for good, with a typed confirmation);
+  - **Insert/Space** tag, **+ − \*** select by mask, **Ctrl+S** quick filter;
+  - **Ctrl+U** swap, **Alt+O/I** sync the other pane, **Ctrl+\\** saved locations, **Alt+Left/Right** history, **Ctrl+Q** quick view;
+  - **Alt+F7** find (name and contents), **Ctrl+M** multi-rename with a live preview, **Ctrl+Shift+P** command palette, **F1** all keys.
+- **Jobs:** copies and moves run as jobs, with progress, speed, pause, resume and cancel, and ask what to do on a name clash (Replace keeps the old one in the bin). **Ctrl+Z** undoes renames, moves, trash, new items and unchanged copies; it never overwrites newer work. An interrupted job is recovered the next time Hoard starts.
+- **System-critical files can never be deleted, moved, renamed or overwritten:** not from Files, the map, the removal list or cleanup. Protection is checked by file identity, so another name for the same folder (a junction, `subst` drive, mapped drive, `\\localhost\C$`, a bind mount) doesn't get around it. Protected rows show a lock and the reason. Links are never followed.
+
 ### Keyboard
 On the map: **arrow keys** move between blocks, **Enter** opens a folder, **Backspace** goes up, **S** marks the selection for removal, **Space** previews a file, **Del** moves it to the Recycle Bin/Trash, **Shift+F10** opens the options menu. **1–4** switch views, **Ctrl+F** searches. In the side lists, **Enter** opens a folder and the arrow keys move between the tabs.
 

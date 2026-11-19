@@ -675,6 +675,7 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
     <button data-view="cleanup" aria-pressed="false" title="Clean up (2)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2 6 8.5M3.5 8.5h7l-1 6h-5z M5.5 11.5v3M8.5 11.5v3"/></svg><span>Clean up</span></button>
     <button data-view="dupes" aria-pressed="false" title="Duplicates (3)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg><span>Duplicates</span></button>
     <button data-view="apps" aria-pressed="false" title="Apps (4)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/></svg><span>Apps</span></button>
+    <button data-view="files" aria-pressed="false" title="Files (5)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M8 2.5v11M1.5 5.5h13"/></svg><span>Files</span></button>
   </div>
   <nav id="drives" aria-label="Drives"></nav>
   <div class="hstatus">
@@ -763,6 +764,7 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
   </aside>
 </main>
 <section id="panel" hidden></section>
+<section id="files" hidden></section>
 
 <aside id="drawer" role="dialog" aria-labelledby="drawerTitle" aria-hidden="true">
   <header><h3 id="drawerTitle">Removal list</h3><button class="btn ghost icon" id="drawerClose" aria-label="Close the removal list"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></header>
@@ -1249,7 +1251,7 @@ function renderDrives() {
     b.innerHTML = `<span class="dl">${icon}${esc(d.name)}</span><span class="dm">
       <span class="dn"><span>${esc(d.type === "cloud" ? (d.backend === "drive" ? "Google account" : "Cloud") : d.label || (d.type === "fixed" ? "Local disk" : d.type === "removable" ? "Removable" : "Network"))}</span><b class="num">${d.total ? fmt(d.free) + " free" : ""}</b></span>
       <span class="dbar"><i class="${pct > .9 ? "hot" : ""}" style="width:${(pct * 100).toFixed(1)}%"></i></span></span>`;
-    b.onclick = () => { if (!on) selectDrive(d.id); };
+    b.onclick = () => { if (S.mode === "files" && window.HoardFM) return HoardFM.openRoot(d.root); if (!on) selectDrive(d.id); };
     if (d.location) b.oncontextmenu = e => { e.preventDefault(); popMenu(e.clientX, e.clientY, [{ label: `Remove “${d.name}” from Hoard`, icon: ICON.hide, run: () => removeLocation(d) }]); };
     el.appendChild(b);
   }
@@ -1654,7 +1656,7 @@ addEventListener("keydown", e => {
     if (menu.style.display === "block") closeMenu(); else if (S.focusCat !== null) { S.focusCat = null; draw(); drawOverlay(); renderComp(); } else setSel(null); return;
   }
   if (S.mode === "simple") return;
-  if (!e.ctrlKey && !e.metaKey && !e.altKey && "1234".includes(e.key) && e.key.length === 1) { setMode(["map", "cleanup", "dupes", "apps"][+e.key - 1]); return; }
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && "12345".includes(e.key) && e.key.length === 1) { setMode(["map", "cleanup", "dupes", "apps", "files"][+e.key - 1]); return; }
   if (S.mode !== "map") return;
   if (e.key === "/") { e.preventDefault(); $("#q").focus(); return; }
   if (e.key.toLowerCase() === "s" && !e.ctrlKey && !e.metaKey && S.sel && canDelete(S.sel.path)) { e.preventDefault(); act("stage", S.sel.path, S.sel.node); return; }
@@ -1929,11 +1931,15 @@ function popMenu(x, y, entries) {
 /* ------------------------------------------------------------------ views */
 function setMode(m) {
   if (!m || S.mode === m) return;
+  if (m === "files") S.fmPrev = S.mode;
+  if (S.mode === "files") window.HoardFM?.hide();
   S.mode = m;
   document.querySelectorAll(".views button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === m));
-  const isMap = m === "map";
+  const isMap = m === "map", isFiles = m === "files";
   $("main").hidden = !isMap;
-  $("#panel").hidden = isMap;
+  $("#panel").hidden = isMap || isFiles;
+  $("#files").hidden = !isFiles;
+  if (isFiles) loadFiles();
   document.querySelector(".toolbar").hidden = !isMap;
   document.body.classList.toggle("no-toolbar", !isMap);
   closeMenu(); tip.style.display = "none"; toggleFilters(false);
@@ -1944,6 +1950,20 @@ function setMode(m) {
   if (isMap) requestAnimationFrame(() => { sizeCanvas(); if (S.view) { layout(); draw(); drawOverlay(); } maybeTip(); });
 }
 document.querySelectorAll(".views button").forEach(b => b.onclick = () => setMode(b.dataset.view));
+/* Files (the two-pane file manager) lives in assets/fm.js + fm.css, fetched the first time it opens */
+let fmLoading = null;
+function loadFiles() {
+  if (window.HoardFM) return window.HoardFM.show();
+  if (fmLoading) return;
+  $("#files").innerHTML = `<div class="loading" style="justify-content:center;padding:60px">${SPIN}Opening Files…</div>`;
+  const v = "?v=" + TOKEN.slice(0, 8);      // new each launch, so an updated Files is never served from cache
+  const css = document.createElement("link"); css.rel = "stylesheet"; css.href = "/assets/fm.css" + v;
+  const js = document.createElement("script"); js.src = "/assets/fm.js" + v;
+  fmLoading = new Promise((ok, bad) => { css.onload = ok; css.onerror = bad; });
+  js.onload = () => fmLoading.catch(() => {}).then(() => { if (S.mode === "files") window.HoardFM?.show(); });
+  js.onerror = () => { fmLoading = null; css.remove(); js.remove(); $("#files").innerHTML = `<div class="empty"><b>Files couldn't load</b>Close this window and start Hoard again.</div>`; };
+  document.head.append(css, js);
+}
 
 /* ------------------------------------------------------------------ staging area */
 async function loadStaged() {

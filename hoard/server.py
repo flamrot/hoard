@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -24,6 +25,8 @@ import plat  # noqa: E402
 import core  # noqa: E402
 import cleanup  # noqa: E402
 import dupes  # noqa: E402
+import fm  # noqa: E402
+import safefs  # noqa: E402
 import apps as appsmod  # noqa: E402
 import cloud  # noqa: E402
 import reports  # noqa: E402
@@ -187,7 +190,7 @@ def trash_any(vid, parts, expect=None):
         node, f = walk(drive_state(vid)["cur"], parts) if list_snaps(vid) else (None, None)
         return cloud.trash(v, parts, is_dir=node is not None and f is None)
     p = os.path.join(v["root"], *parts)
-    why = plat.protected(v["root"], parts, p)
+    why = plat.protected(v["root"], parts, p) or plat.critical(p)
     if why:
         return False, why
     if plat.linked_ancestor(v["root"], parts):
@@ -202,7 +205,22 @@ def trash_any(vid, parts, expect=None):
         if (len(expect) == 3 and now != list(expect)) or (len(expect) == 1 and now[2] != expect[0]):
             return False, ("This changed since you marked it: something else is at that path now. "
                            "Mark it again if you still want it removed.")
-    return plat.trash(p)
+    # hold the folders from the root of the disk down to the item while the OS trashes it, and check the item
+    # (identity and protection) through that held folder, so nothing can be swapped in between
+    try:
+        with safefs.Dir.open(os.path.dirname(p), guard=True) as d:
+            name = os.path.basename(p)
+            now = d.check(name, list(expect) if expect is not None and len(expect) == 3 else None, guard=True)
+            if expect is not None and len(expect) == 1 and (stat.S_ISDIR(now.st_mode) and not plat.is_link(now)) != expect[0]:
+                raise safefs.Unsafe(safefs.CHANGED)
+            ok, err, _where = d.trash(name, safefs.ident(now))
+            return ok, err
+    except safefs.Unsafe as ex:
+        return False, str(ex)
+    except FileNotFoundError:
+        return True, "gone"
+    except OSError as ex:
+        return False, ex.strerror or str(ex)
 
 
 def _tree(s, vid, ts):
@@ -269,6 +287,19 @@ def locate(path):
     s = drive_state(best[0])
     node, f = walk(s["cur"], best[1]) if s["cur"] is not None else (None, None)
     return best[0], best[1], (f if f else node)
+
+
+def fm_scan_lookup(path):
+    """For the Files view: (node or None, scan time) of Hoard's last scan of the folder at path."""
+    if not VOLS:
+        volumes()
+    vid, _parts, node = locate(path)
+    if vid is None:
+        return None, None
+    return node, drive_state(vid)["cur_ts"]
+
+
+fm.HOOKS.update(scan=fm_scan_lookup, volumes=volumes)
 
 
 def run_scan(vid):
@@ -691,6 +722,18 @@ LAST_SEEN = {"t": time.time(), "bye": None}
 APPS_CACHE = {"t": 0, "items": []}
 
 
+class _Keep:
+    """Use an already opened file in a with-block without closing it there (its owner closes it)."""
+    def __init__(self, f):
+        self.f = f
+
+    def __enter__(self):
+        return self.f
+
+    def __exit__(self, *exc):
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Hoard/3"
 
@@ -723,13 +766,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, html_bytes, "text/html; charset=utf-8")
         if u.path == "/file":
             return self._file(parse_qs(u.query))
+        if u.path == "/fmfile":
+            return self._fmfile(parse_qs(u.query))
         if u.path.startswith("/assets/"):
             return self._asset(u.path.removeprefix("/assets/"))
         self._send(404, {"error": "not found"})
 
     ASSET_TYPES = {"startup.json": "application/json", "loading.json": "application/json",
                    "scanning.json": "application/json", "done.json": "application/json",
-                   "dotlottie.js": "text/javascript; charset=utf-8", "dotlottie-player.wasm": "application/wasm"}
+                   "dotlottie.js": "text/javascript; charset=utf-8", "dotlottie-player.wasm": "application/wasm",
+                   "fm.js": "text/javascript; charset=utf-8", "fm.css": "text/css; charset=utf-8"}
 
     def _asset(self, name):
         """The animation player and animations bundled with the app: a fixed list, nothing else."""
@@ -766,6 +812,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         if not os.path.isfile(path):
             return self._send(404, {"error": "not a file"})
+        self._stream(path, size)
+
+    def _fmfile(self, q):
+        """The Files view's viewer: stream any regular file by absolute path (never a link, folder or device)."""
+        if (q.get("t") or [""])[0] != TOKEN:
+            return self._send(403, {"error": "bad token"})
+        try:
+            f, st = fm.open_for_read(q["p"][0])      # no links anywhere on the way; verified after opening
+        except (KeyError, fm.FmError):
+            return self._send(404, {"error": "not found"})
+        with f:
+            self._stream(q["p"][0], st.st_size, f)
+
+    def _stream(self, path, size, opened=None):
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
         if ctype in ("text/html", "application/xhtml+xml", "text/xml", "application/xml", "text/javascript"):
             ctype = "text/plain"            # show markup as text; never run it in the app's page
@@ -790,7 +850,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
         try:
-            with open(path, "rb") as f:
+            with (open(path, "rb") if opened is None else _Keep(opened)) as f:
                 f.seek(start)
                 left = end - start + 1
                 while left > 0:
@@ -1541,6 +1601,47 @@ class Handler(BaseHTTPRequestHandler):
         import updates
         return updates.install(desktop=bool(b.get("desktop")))
 
+    # ---------------------------------------------------------- Files view (logic in fm.py)
+    def api_fm_roots(self, b):
+        volumes()
+        return fm.fm_roots(b)
+
+    def api_fm_list(self, b):
+        return fm.fm_list(b)
+
+    def api_fm_check(self, b):
+        return fm.fm_check(b)
+
+    def api_fm_plan(self, b):
+        return fm.fm_plan(b)
+
+    def api_fm_start(self, b):
+        return fm.fm_start(b)
+
+    def api_fm_jobs(self, b):
+        return fm.fm_jobs(b)
+
+    def api_fm_control(self, b):
+        return fm.fm_control(b)
+
+    def api_fm_decide(self, b):
+        return fm.fm_decide(b)
+
+    def api_fm_undo(self, b):
+        return fm.fm_undo(b)
+
+    def api_fm_sizes(self, b):
+        return fm.fm_sizes(b)
+
+    def api_fm_find(self, b):
+        return fm.fm_find(b)
+
+    def api_fm_read(self, b):
+        return fm.fm_read(b)
+
+    def api_fm_prefs(self, b):
+        return fm.fm_prefs(b)
+
     def api_open_folder(self, b):
         p = b.get("which") == "reports" and core.load_settings().get("reportDir")
         if p and os.path.isdir(p):
@@ -1554,8 +1655,8 @@ def watchdog():
         time.sleep(2)
         now = time.time()
         bye = LAST_SEEN["bye"]
-        if (bye and now - bye > 5) or now - LAST_SEEN["t"] > 300:
-            os._exit(0)
+        if ((bye and now - bye > 5) or now - LAST_SEEN["t"] > 300) and not fm.busy():
+            os._exit(0)                  # but never in the middle of a file job
 
 
 def main(open_window=True, port=0, open_path=None):
@@ -1566,6 +1667,7 @@ def main(open_window=True, port=0, open_path=None):
     except Exception:  # noqa: BLE001
         pass
     threading.Thread(target=core.warm_indexes, daemon=True).start()
+    threading.Thread(target=fm.recover, daemon=True).start()      # clean up after a Files job cut short last time
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     if open_path:                              # "Open in Hoard" from the file manager

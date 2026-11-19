@@ -117,6 +117,22 @@ def main():
                 time.sleep(0.25)
             fail("scan did not finish")
 
+        # Files view: its assets are bundled, it lists folders, and system folders report as protected
+        for name in ("fm.js", "fm.css"):
+            if urllib.request.urlopen(f"{base}/assets/{name}", timeout=10).status != 200:
+                fail(f"{name} not served")
+        roots = api("fm_roots")
+        if not roots.get("roots"):
+            fail(f"Files lists no drives: {roots}")
+        listing = api("fm_list", {"path": target, "sort": "name"})
+        if listing.get("error") or not {"sub", "models"} <= {r["n"] for r in listing["rows"]}:
+            fail(f"Files listing of the test folder failed: {listing.get('error')}")
+        system = "C:\\Windows" if os.name == "nt" else "/usr"
+        chk = api("fm_check", {"paths": [system]})["items"][0]
+        if not chk.get("p"):
+            fail(f"{system} should be protected")
+        print(f"Files: {len(roots['roots'])} drives, listing ok, {system} protected")
+
         d = api("drives")
         print(f"os={d['os']} trash={d['trashName']} reveal={d['revealName']}")
         for v in d["drives"]:
