@@ -13,7 +13,7 @@ DATA_DIR = plat.DATA_DIR
 SCANS_DIR = os.path.join(DATA_DIR, "scans")
 
 KEEP_FILE = 1 << 20      # files >= 1 MB are kept individually; smaller ones are aggregated
-MAX_FILES = 300          # max individual files kept per folder
+MAX_FILES = 5000         # max individual files kept per folder (search and duplicates use them)
 INDEX_MIN = 5 << 20      # folders >= 5 MB go into each snapshot's size index (growth charts)
 
 # ---------------------------------------------------------------- categories
@@ -27,7 +27,7 @@ _EXT = {
     4: "jpg jpeg png gif bmp webp tif tiff psd cr2 nef arw dng heic svg ico mp3 wav flac ogg m4a aac wma opus aiff",
     5: "js mjs cjs ts tsx jsx py pyc pyd json map css scss html c h cpp hpp cs java class jar go rs rb php lua sh ps1 bat yml yaml toml lock md wasm o obj idx pack whl rlib",
     6: "pdf doc docx xls xlsx ppt pptx txt rtf odt ods csv epub log pages numbers key",
-    # not "bin": games (Path of Exile 2, …) and countless apps use .bin for ordinary data
+    # not "bin": games (Path of Exile 2, â€¦) and countless apps use .bin for ordinary data
     7: "safetensors ckpt gguf ggml pt pth onnx h5 tflite pb npz npy mlmodel",
 }
 EXT = {e: c for c, s in _EXT.items() for e in s.split()}
@@ -115,6 +115,7 @@ class Scan:
         self.cloud = 0
         self.fast = False
         self._tick = 0
+        self.seen = set()          # (device, inode) of hard-linked files already counted
 
 
 def scan_dir(path, name, st):
@@ -151,6 +152,14 @@ def scan_dir(path, name, st):
                 elif e.is_file(follow_symlinks=False):
                     s = e.stat(follow_symlinks=False)
                     sz = size_of(s)
+                    if s.st_nlink > 1 and sz >= 65536:          # POSIX hard links: count each file once
+                        key = (s.st_dev, s.st_ino)
+                        if key in st.seen:
+                            continue
+                        st.seen.add(key)
+                    attrs = getattr(s, "st_file_attributes", 0)
+                    if attrs & 0xA00 and plat.alloc_size:       # Windows sparse (0x200) / compressed (0x800)
+                        sz = plat.alloc_size(e.path, sz)
                     mt = int(s.st_mtime)
                     cs = cloud_size(s)
                     if cs:

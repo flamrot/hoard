@@ -17,7 +17,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::time::Instant;
 
 const KEEP_FILE: u64 = 1 << 20; // files >= 1 MB are listed individually
-const MAX_FILES: usize = 300; // per folder
+const MAX_FILES: usize = 5000; // per folder (so search and duplicates see big media folders whole)
 const NONE: u32 = u32::MAX;
 const ROOT: u32 = 5; // MFT record number of the root directory
 // RECALL_ON_DATA_ACCESS | OFFLINE. (Not RECALL_ON_OPEN, 0x40000: on disk that bit also means
@@ -169,7 +169,14 @@ fn parse_record(rec: &[u8], idx: usize, r: &mut Records) {
                 if nonres == 0 {
                     r.size[target] = u32le(rec, off + 0x10) as u64;
                 } else if u64le(rec, off + 0x10) == 0 { // first extent holds the real size
-                    r.size[target] = u64le(rec, off + 0x30);
+                    // sparse (0x8000) or compressed (0x0001) streams: count the clusters really
+                    // allocated ("total allocated", at 0x40), not the logical length
+                    let flags = u16le(rec, off + 0x0C);
+                    r.size[target] = if flags & 0x8001 != 0 && len >= 0x48 && off + 0x48 <= rec.len() {
+                        u64le(rec, off + 0x40)
+                    } else {
+                        u64le(rec, off + 0x30)
+                    };
                 }
             }
             _ => {}

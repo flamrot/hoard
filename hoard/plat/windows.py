@@ -169,6 +169,20 @@ _k32.CloseHandle.argtypes = [wintypes.HANDLE]
 _INVALID = wintypes.HANDLE(-1).value
 
 
+_k32.GetCompressedFileSizeW.restype = wintypes.DWORD
+_k32.GetCompressedFileSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+
+
+def alloc_size(path, logical):
+    """Bytes a sparse or compressed file really takes on disk (its logical length if Windows can't say)."""
+    high = wintypes.DWORD(0)
+    ctypes.set_last_error(0)
+    low = _k32.GetCompressedFileSizeW(path, ctypes.byref(high))
+    if low == 0xFFFFFFFF and ctypes.get_last_error():
+        return logical
+    return (high.value << 32) | low
+
+
 def pin_dir(path, expect=None):
     """Open the folder itself (never what a junction points to) and keep the handle: without delete sharing,
     nobody can rename, delete or swap it for a junction until unpin_dir(). Checks it's a real folder and,

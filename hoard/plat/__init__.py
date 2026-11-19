@@ -48,6 +48,7 @@ HIDDEN_NOTE = _os.HIDDEN_NOTE              # why "used" space can exceed what th
 context_menu_install = _os.context_menu_install   # (argv) -> (ok, error): "Open in Hoard" in the file manager
 context_menu_remove = _os.context_menu_remove
 context_menu_status = _os.context_menu_status
+alloc_size = getattr(_os, "alloc_size", None)   # (path, logical) -> bytes really allocated (Windows sparse/compressed)
 
 
 def file_info(path):

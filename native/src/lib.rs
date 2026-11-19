@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 pub const KEEP_FILE: u64 = 1 << 20; // files >= 1 MB are listed individually
-pub const MAX_FILES: usize = 300; // per folder
+pub const MAX_FILES: usize = 5000; // per folder (so search and duplicates see big media folders whole)
 pub const OTHER: u8 = 8;
 
 /// ext -> category, from the tab-separated file Hoard writes (so categories live in one place: core.py).

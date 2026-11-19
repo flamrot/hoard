@@ -606,6 +606,19 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
   aside { border-left: 0; border-top: 1px solid var(--line); }
   .hstatus #status { display: none; }
 }
+.welcome .steps { margin: 4px 0 18px; padding-left: 20px; display: grid; gap: 12px; color: var(--ink-2); }
+.welcome .steps b { color: var(--ink); }
+
+/* ---- settings: grouped, with a jump bar and a footer that stays in view ---- */
+.set-jump { position: sticky; top: -24px; z-index: 2; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 -4px 6px; padding: 6px 4px 10px; background: var(--surface); }
+.set-jump a { font-size: 12.5px; color: var(--ink-2); text-decoration: none; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); }
+.set-jump a:hover { color: var(--ink); border-color: var(--line-2); }
+.set-group { margin: 22px 0 4px; font-size: 13px; font-weight: 650; color: var(--ink); scroll-margin-top: 48px; }
+.set-group:first-of-type { margin-top: 6px; }
+.set-foot { position: sticky; bottom: -24px; margin: 16px -24px -24px; padding: 12px 24px 18px; background: var(--surface); border-top: 1px solid var(--line); display: grid; gap: 6px; }
+.set-foot .row-actions { margin-top: 0; }
+.set-dirty { font-size: 12.5px; color: var(--grow); }
+
 /* ---- accessibility helpers ---- */
 .sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .tabs .tablist { display: contents; }
@@ -2472,12 +2485,22 @@ async function renderApps(refresh) {
 function drawApps() {
   const p = $("#panel"), q = S.appQ.toLowerCase();
   const items = S.apps.items.filter(a => !q || a.name.toLowerCase().includes(q) || (a.publisher || "").toLowerCase().includes(q));
-  const total = items.reduce((t, a) => t + (a.size || 0), 0);
+  // the headline counts only what the scan measured, each install folder once (several apps can share one,
+  // or sit inside another's); what apps merely *report* about themselves is shown apart, as a guess
+  const norm = s => (s || "").replace(/[\\/]+$/, "").toLowerCase();
+  const measured = items.filter(a => a.sizeFrom === "scan" && a.location).sort((x, y) => norm(x.location).length - norm(y.location).length);
+  const counted = [];
+  for (const a of measured) {
+    const l = norm(a.location);
+    if (!counted.some(c => l === c.l || l.startsWith(c.l + "\\") || l.startsWith(c.l + "/"))) counted.push({ l, s: a.size });
+  }
+  const total = counted.reduce((t, c) => t + c.s, 0);
+  const guessed = items.filter(a => a.sizeFrom === "estimate"), guess = guessed.reduce((t, a) => t + (a.size || 0), 0);
   const how = S.apps.os === "windows" ? "Uninstall runs the app's own uninstaller." : S.apps.os === "macos" ? "Uninstall puts the app on the removal list for the Trash." : "Uninstall shows the command to run in a terminal.";
   const prevScroll = p.scrollTop;
   p.innerHTML = `<div class="pwrap">
     <div class="phead"><div><h2>Apps</h2><p>Installed apps, biggest first. ${how} “Related folders” finds settings and caches that apps leave behind in your profile, so you can review them and mark them for removal.</p></div>
-      <div class="ptotal num">${fmt(total)}<small>${items.length} apps</small></div></div>
+      <div class="ptotal num" title="Measured in the apps' install folders on the last scan, each folder counted once">${fmt(total)}<small>measured · ${items.length} apps${guessed.length ? ` · ${guessed.length} more say about ${fmt(guess)}, not checked` : ""}</small></div></div>
     <div class="ptools" style="margin-bottom:14px"><input type="search" id="appQ" placeholder="Filter apps" value="${esc(S.appQ)}" style="width:260px">
       <button class="btn" id="appRefresh">Refresh</button></div>
     ${items.map(a => appRow(a)).join("") || `<div class="empty">No apps match.</div>`}</div>`;
@@ -2634,8 +2657,31 @@ async function renderSimple() {
       ${d.total ? `<div class="meter" role="img" aria-label="${fmt(d.used)} used, ${fmt(d.free)} free"><i class="${cls}" style="width:${(pct * 100).toFixed(1)}%"></i></div>
         <div class="meterlabel" aria-hidden="true"><span>${fmt(d.used)} used</span><span>${fmt(d.free)} free</span></div>` : ""}</div>`;
   if (!S.meta?.has || !S.view) {
-    p.innerHTML = `<div class="simple-wrap">${hero}<div class="scard"><h3>Let Hoard take a look</h3><p class="sub">Press <b>Check this drive</b>. Hoard reads every folder, nothing is changed, and then shows you what's using the space and what's safe to remove.</p></div></div>`;
+    const firstRun = S.drives.every(x => !x.scanned);
+    const local = S.drives.filter(x => x.type === "fixed" || x.type === "removable" || x.system);
+    p.innerHTML = `<div class="simple-wrap">${hero}${firstRun ? `<div class="scard wide welcome">
+        <h3>Welcome to Hoard</h3>
+        <p class="sub">Hoard reads every folder on a drive and shows what's using the space and what's safe to clear. It only reads: nothing is changed, deleted or uploaded unless you ask.</p>
+        <ol class="steps">
+          <li><b>Check ${esc(d.name)} now.</b> Usually a minute or less.</li>
+          <li><label class="cand" style="grid-template-columns:22px 1fr;padding:0"><input type="checkbox" id="wDaily" checked>
+            <span><b>Check every morning at 7:00</b> so Hoard can show what grew. It runs in the background, even when Hoard is closed. You can change this in Settings.</span></label>
+            ${local.length > 1 ? `<div class="checks" id="wDisks" style="margin:8px 0 0 30px">${local.map(x => `<label><input type="checkbox" value="${esc(x.id)}" ${x.id === d.id ? "checked" : ""}>${esc(x.name)}</label>`).join("")}</div>` : ""}</li>
+          <li>Then free up space safely, and mark anything big you don't need for removal. Nothing is deleted until you confirm.</li>
+        </ol>
+        <button class="btn primary bigbtn" id="wGo">Check ${esc(d.name)} now</button></div>`
+      : `<div class="scard"><h3>Let Hoard take a look</h3><p class="sub">Press <b>Check this drive</b>. Hoard reads every folder, nothing is changed, and then shows you what's using the space and what's safe to remove.</p></div>`}</div>`;
     $("#simpleScan").onclick = startScan;
+    const go = $("#wGo");
+    if (go) go.onclick = async () => {
+      go.disabled = true;
+      if ($("#wDaily").checked) {
+        const vols = [...document.querySelectorAll("#wDisks input:checked")].map(x => x.value);
+        const r = await api("save_settings", { settings: { schedule: { enabled: true, time: "07:00", volumes: vols.length ? vols : [d.id] } } }).catch(e => ({ error: e.message }));
+        if (r.error) toast(`The daily check couldn't be set up: ${r.error}`, "error", "You can turn it on later in Settings.");
+      }
+      startScan();
+    };
     return;
   }
   if (S.path.length) { await loadView([]); return; }
@@ -2927,12 +2973,15 @@ async function openSettings() {
   const sch = r.schedule;
   d.classList.add("wide");
   d.innerHTML = `<h3>Settings</h3>
+    <nav class="set-jump" aria-label="Settings sections">${[["setScan", "Daily check"], ["setClean", "Cleanup"], ["setDesk", "Desktop"],
+      ["setLists", "Ignored & alerts"], ["setLook", "Appearance"], ["setAbout", "Updates"]].map(([id, t]) => `<a href="#${id}">${t}</a>`).join("")}</nav>
+    <h4 class="set-group" id="setScan">Daily check</h4>
     <section class="set">
       <div class="set-row"><div><b>Scan automatically every day</b><small>${esc(r.scheduleNote)}</small></div>
         <label class="switch"><input type="checkbox" id="stOn" ${st.schedule.enabled ? "checked" : ""} aria-label="Scan automatically every day"><span></span></label></div>
       <div class="set-sub ${st.schedule.enabled ? "" : "off"}" id="stSub">
-        <div class="field"><span>Time</span><input type="time" id="stTime" value="${esc(st.schedule.time)}" required></div>
-        <div class="field"><span>Disks</span><div class="checks">${disks.map(v =>
+        <div class="field"><label for="stTime">Time</label><input type="time" id="stTime" value="${esc(st.schedule.time)}" required></div>
+        <div class="field" role="group" aria-labelledby="stDisksL"><span id="stDisksL">Disks</span><div class="checks">${disks.map(v =>
           `<label><input type="checkbox" value="${esc(v.id)}" ${chosen.has(v.id) ? "checked" : ""}>${esc(v.name)}</label>`).join("")}</div></div>
         ${S.os === "windows" && S.fastVols.length ? `<label class="cand" style="grid-template-columns:22px 1fr;padding:0">
           <input type="checkbox" id="stSchedFast" ${st.scheduleFast ? "checked" : ""}><span>Use fast scan (sees protected folders too). Windows asks for permission once, when you save.</span></label>` : ""}
@@ -2953,11 +3002,12 @@ async function openSettings() {
       <div class="field" style="margin-top:10px"><span style="width:auto">When less than</span>
         <input type="number" id="stLowPct" min="0" max="50" value="${st.lowSpace?.percent ?? 10}" style="width:64px;height:30px;border-radius:6px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--ink);font:inherit;padding:0 6px"> % or
         <input type="number" id="stLowGb" min="0" value="${st.lowSpace?.gb ?? 20}" style="width:72px;height:30px;border-radius:6px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--ink);font:inherit;padding:0 6px"> GB is free</div></section>
+    <h4 class="set-group" id="setClean">Cleanup</h4>
     <section class="set"><div class="set-row"><div><b>Clean up automatically</b><small>Clears only the caches and temporary files you tick, after the daily check. Your own files are never touched.${st.autoClean?.last ? ` Last run ${esc(ago(st.autoClean.last))}.` : ""}</small></div>
       <label class="switch"><input type="checkbox" id="stAuto" ${st.autoClean?.enabled ? "checked" : ""} aria-label="Clean up automatically"><span></span></label></div>
       <div class="field" style="margin-top:10px"><span style="width:auto">Every</span><select id="stAutoEvery"><option value="week" ${st.autoClean?.every !== "day" ? "selected" : ""}>week</option><option value="day" ${st.autoClean?.every === "day" ? "selected" : ""}>day</option></select></div>
       <div class="checks" style="margin-top:10px">${(r.cleanChoices || []).map(c => `<label><input type="checkbox" data-auto="${esc(c.id)}" ${(st.autoClean?.ids || []).includes(c.id) ? "checked" : ""}>${esc(c.title)}</label>`).join("")}</div></section>
-    ${S.os === "windows" || r.contextMenuSupported ? `<section class="set">
+    ${S.os === "windows" || r.contextMenuSupported ? `<h4 class="set-group" id="setDesk">Desktop</h4><section class="set">
       ${S.os === "windows" ? `<div class="set-row"><div><b>Tray icon</b><small>Free space at a glance next to the clock, low-space warnings, and quick access. Starts when you sign in.</small></div>
         <label class="switch"><input type="checkbox" id="stTray" ${st.tray ? "checked" : ""} aria-label="Tray icon"><span></span></label></div>` : ""}
       ${r.contextMenuSupported ? `<div class="set-row" style="margin-top:12px"><div><b>“Open in Hoard” when you right-click a folder</b><small>${S.os === "windows" ? "In File Explorer (on Windows 11, under “Show more options”)." : "In Files/Nautilus, Nemo and Caja (Scripts menu) and Dolphin."}</small></div>
@@ -2965,20 +3015,40 @@ async function openSettings() {
     <section class="set"><div class="set-row"><div><b>Save a report after each daily scan</b><small>An HTML page listing what grew and the largest folders and files, saved to ${esc(st.reportDir || r.defaultReportDir)}.</small></div>
       <label class="switch"><input type="checkbox" id="stReport" ${st.reportDir ? "checked" : ""} aria-label="Save a report after each daily scan"><span></span></label></div>
       ${st.reportDir ? `<button class="btn" id="stOpenReports" style="margin-top:10px">Open reports folder</button>` : ""}</section>
+    <h4 class="set-group" id="setLists">Ignored folders and size alerts</h4>
     <section class="set"><b>Ignored folders</b><small>Hidden from the map, lists, search and duplicates (they're still scanned). Right-click anything on the map to ignore it.</small>
       <div class="report" id="stIgn"></div></section>
     <section class="set"><b>Size alerts</b><small>A notification after a daily scan when a folder first passes its limit. Right-click a folder on the map to add one.</small>
       <div class="report" id="stWatch"></div></section>
-    <section class="set"><div class="set-row"><div><b>Appearance</b></div>
+    <h4 class="set-group" id="setLook">Appearance</h4>
+    <section class="set"><div class="set-row"><div><b>Theme</b></div>
       <div class="seg" id="stTheme">${["system", "light", "dark"].map(t => `<button type="button" data-t="${t}" aria-pressed="${t === theme}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div></div></section>
     ${report ? `<section class="set"><b>Recent automatic scans</b><div class="report">${report}</div></section>` : ""}
+    <h4 class="set-group" id="setAbout">Updates</h4>
     <section class="set"><div class="set-row"><div><b>Hoard ${esc(about.version || "")}</b><small id="updLine">${esc(updateLine(about.update))}</small></div>
       <button class="btn" id="updCheck">Check for updates</button></div>
       <label class="cand" style="grid-template-columns:22px 1fr;padding:6px 0 0"><input type="checkbox" id="stUpd" ${st.updateCheck !== false ? "checked" : ""}><span>Check for a new version once a day</span></label>
       ${about.canInstall ? `<div class="set-row" style="margin-top:10px"><small style="margin:0">${about.installed ? "Installed for this account (Start menu, and Settings → Apps to uninstall)." : "Install Hoard for this account: Start menu entry and an uninstall entry in Settings → Apps. No admin rights needed."}</small>
         <button class="btn" id="instSelf">${about.installed ? "Reinstall" : "Install"}</button></div>` : ""}</section>
-    <div class="form-error" id="stErr" hidden></div>
-    <div class="row-actions"><button class="btn" id="stCancel">Cancel</button><button class="btn primary" id="stSave">Save</button></div>`;
+    <div class="set-foot"><div class="form-error" id="stErr" role="alert" hidden></div><span class="set-dirty" id="stDirty" hidden>Unsaved changes</span>
+      <div class="row-actions"><button class="btn" id="stCancel">Cancel</button><button class="btn primary" id="stSave">Save</button></div></div>`;
+  // know when something changed, so Cancel / Esc don't silently throw edits away
+  const formState = () => [...d.querySelectorAll("input, select")].map(x => x.type === "checkbox" ? x.checked : x.value).join("|") + "|" + theme;
+  const initial = formState();
+  let discardOk = false;
+  const dirty = () => formState() !== initial;
+  d.addEventListener("input", () => { $("#stDirty").hidden = !dirty(); discardOk = false; $("#stCancel").textContent = "Cancel"; });
+  d.addEventListener("click", () => setTimeout(() => { if ($("#stDirty")) $("#stDirty").hidden = !dirty(); }));
+  const guardClose = e => {
+    if (saved || discardOk || !dirty()) return true;
+    e?.preventDefault?.();
+    discardOk = true;
+    $("#stCancel").textContent = "Discard changes";
+    $("#stDirty").hidden = false; $("#stDirty").textContent = "Unsaved changes: press Discard changes (or Esc again) to throw them away, or Save.";
+    return false;
+  };
+  d.addEventListener("cancel", e => guardClose(e), { once: false });
+  d.querySelectorAll(".set-jump a").forEach(a => a.onclick = e => { e.preventDefault(); d.querySelector(a.getAttribute("href")).scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" }); });
   const on = $("#stOn");
   on.onchange = () => $("#stSub").classList.toggle("off", !on.checked);
   const ign = JSON.parse(JSON.stringify(st.ignore || {}));
@@ -3026,7 +3096,7 @@ async function openSettings() {
     theme = b.dataset.t; applyTheme(theme);
     d.querySelectorAll("#stTheme button").forEach(x => x.setAttribute("aria-pressed", x === b));
   });
-  $("#stCancel").onclick = () => d.close();
+  $("#stCancel").onclick = e => { if (guardClose(e)) d.close(); };
   $("#stSave").onclick = async () => {
     const err = $("#stErr"), btn = $("#stSave");
     const body = { settings: {
