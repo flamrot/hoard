@@ -236,7 +236,7 @@ def installed_apps():
 
 
 def run_uninstall(app):
-    return False, "Move the app to the Trash from Hoard's staging area."
+    return False, "Move the app to the Trash from Hoard's removal list."
 
 
 def context_menu_install(argv):
