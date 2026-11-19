@@ -18,7 +18,9 @@ const KEEP_FILE: u64 = 1 << 20; // files >= 1 MB are listed individually
 const MAX_FILES: usize = 300; // per folder
 const NONE: u32 = u32::MAX;
 const ROOT: u32 = 5; // MFT record number of the root directory
-const CLOUD_ATTRS: u32 = 0x40_0000 | 0x4_0000 | 0x1000; // RECALL_ON_DATA_ACCESS | RECALL_ON_OPEN | OFFLINE
+// RECALL_ON_DATA_ACCESS | OFFLINE. (Not RECALL_ON_OPEN, 0x40000: on disk that bit also means
+// "has extended attributes", which ordinary local files carry.)
+const CLOUD_ATTRS: u32 = 0x40_0000 | 0x1000;
 const OTHER: u8 = 8;
 
 fn u16le(b: &[u8], o: usize) -> u16 { u16::from_le_bytes([b[o], b[o + 1]]) }

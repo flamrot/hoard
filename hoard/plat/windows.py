@@ -12,7 +12,9 @@ REVEAL_NAME = "Explorer"
 
 
 # OneDrive / Google Drive for desktop / Dropbox "online-only" placeholders: the bytes live in the cloud
-CLOUD_ATTRS = 0x400000 | 0x40000 | 0x1000   # RECALL_ON_DATA_ACCESS | RECALL_ON_OPEN | OFFLINE
+# RECALL_ON_DATA_ACCESS | OFFLINE. Not RECALL_ON_OPEN (0x40000): it shares its value with
+# FILE_ATTRIBUTE_EA, which ordinary local files can carry; cloud *files* always have RECALL_ON_DATA_ACCESS.
+CLOUD_ATTRS = 0x400000 | 0x1000
 
 
 def size_of(st):
@@ -244,6 +246,12 @@ def cleanup_specs():
          "desc": "Old Windows Update downloads, Delivery Optimization files and upgrade leftovers. Windows' own Disk Cleanup removes these.",
          "action": "tool", "tool": ["cleanmgr.exe", "/d", sysdrive[0]],
          "paths": [os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "SoftwareDistribution", "Download")]},
+        {"id": "livekernel", "group": "System", "title": "Windows kernel crash reports",
+         "desc": "Memory dumps Windows saves after driver or system hangs (often several GB). Only a fast scan can measure "
+                 "this protected folder; remove them from an admin terminal.",
+         "action": "command", "admin": True,
+         "command": f'del /q "{os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "LiveKernelReports")}\\*.dmp"',
+         "paths": [os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "LiveKernelReports")]},
         {"id": "hiber", "group": "System", "title": "Hibernation file",
          "desc": "Reserved for hibernate and Fast Startup. If you never hibernate, you can turn it off in an admin terminal.",
          "action": "command", "command": "powercfg /h off", "admin": True, "file": sysdrive + "hiberfil.sys"},

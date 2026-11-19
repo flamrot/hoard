@@ -70,7 +70,11 @@ def scan(v, st):
     k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
     k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
     k32.CloseHandle.argtypes = [wintypes.HANDLE]
-    work = tempfile.mkdtemp(prefix="hoard-mft-", dir=core.DATA_DIR)
+    # Not tempfile.mkdtemp: its owner-only permissions would lock this (unelevated) process out of
+    # files the elevated helper creates, because those are owned by the Administrators group.
+    import secrets
+    work = os.path.join(core.DATA_DIR, "mft-" + secrets.token_hex(6))
+    os.makedirs(work)
     out, prog, extmap = (os.path.join(work, n) for n in ("tree.json", "progress.txt", "ext.tsv"))
     with open(extmap, "w", encoding="utf-8") as f:
         f.writelines(f"{e}\t{c}\n" for e, c in core.EXT.items())
