@@ -1,8 +1,20 @@
 [package]
-name = "hoard-mft"
-version = "1.0.0"
+name = "hoard-native"
+version = "1.1.0"
 edition = "2021"
-description = "Reads an NTFS volume's master file table and writes Hoard's scan tree (Windows, needs admin)."
+description = "Hoard's native scanners: hoard-walk (parallel, every OS) and hoard-mft (NTFS file table, Windows, admin)."
+
+[lib]
+name = "hoard_native"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hoard-walk"
+path = "src/bin/hoard-walk.rs"
+
+[[bin]]
+name = "hoard-mft"
+path = "src/bin/hoard-mft.rs"   # Windows only: build it with --bin hoard-mft on Windows
 
 [dependencies]
 

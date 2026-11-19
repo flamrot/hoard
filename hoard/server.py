@@ -101,7 +101,19 @@ def is_cloud(vid):
 
 
 def scan_any(v, st):
-    return cloud.scan_remote(v, st) if v["type"] == "cloud" else core.scan_volume(v, st)
+    """Cloud -> rclone; otherwise the parallel native walker when bundled, else the Python scanner."""
+    if v["type"] == "cloud":
+        return cloud.scan_remote(v, st)
+    import fastscan
+    if fastscan.walk_available():
+        st.exclude = {os.path.normpath(p) for p in plat.scan_excludes(v["root"])}
+        try:
+            return fastscan.walk_scan(v, st)
+        except Exception as ex:  # noqa: BLE001 - fall back to the Python scanner
+            core.log_error("hoard-walk", str(ex))
+            st.files = st.bytes = st.errors = 0
+            st.current = "Scanning…"
+    return core.scan_volume(v, st)
 
 
 def fast_available(v):
@@ -251,7 +263,12 @@ def headless_scan(ids=None):
             t0 = time.time()
             st = core.Scan(vid, 0)
             try:
-                tree = scan_any(v, st)
+                # the task runs with admin rights when "use fast scan" was approved in Settings
+                if settings.get("scheduleFast") and plat.NAME == "windows" and plat._os.is_admin() and fast_available(v):
+                    import fastscan
+                    tree = fastscan.scan(v, st)
+                else:
+                    tree = scan_any(v, st)
             except Exception as ex:  # noqa: BLE001 - e.g. a cloud that's offline; keep going with the rest
                 core.log_error(f"scheduled scan of {vid}", str(ex))
                 continue
@@ -1233,6 +1250,11 @@ class Handler(BaseHTTPRequestHandler):
         cur["theme"] = new.get("theme") if new.get("theme") in ("system", "light", "dark") else cur["theme"]
         if "fastScan" in new:
             cur["fastScan"] = bool(new["fastScan"])
+        if "updateCheck" in new:
+            cur["updateCheck"] = bool(new["updateCheck"])
+        before = core.load_settings()
+        cur["scheduleFast"] = bool(new.get("scheduleFast", cur.get("scheduleFast"))) and plat.NAME == "windows" \
+            and any(fast_available(v) for v in VOLS.values())
         if "ignore" in new and isinstance(new["ignore"], dict):
             cur["ignore"] = {k: [str(p) for p in v] for k, v in new["ignore"].items() if v}
         if "watch" in new and isinstance(new["watch"], list):
@@ -1247,18 +1269,46 @@ class Handler(BaseHTTPRequestHandler):
             cur["reportDir"] = rd
         if cur["schedule"]["enabled"] and not cur["schedule"]["volumes"]:
             return {"error": "Choose at least one disk to scan."}
-        core.save_settings(cur)
-        err = None
+        err, ok = None, True
         h, m = (int(x) for x in t.split(":"))
+        status = plat.schedule_status()
         if cur["schedule"]["enabled"]:
-            ok, err = plat.schedule_install(h, m, plat.self_command() + ["--scan"])
+            # re-register only when something changed (an admin-level task means a permission prompt)
+            changed = (not status["installed"] or before["schedule"]["time"] != t
+                       or bool(status.get("elevated")) != cur["scheduleFast"])
+            if changed:
+                ok, err = plat.schedule_install(h, m, plat.self_command() + ["--scan"], elevated=cur["scheduleFast"])
+                if not ok and cur["scheduleFast"]:
+                    cur["scheduleFast"] = False          # declined: keep a normal daily scan instead
+                    ok2, _ = plat.schedule_install(h, m, plat.self_command() + ["--scan"])
+                    err = (err or "") + (" The daily scan will use the normal scanner." if ok2 else "")
         else:
             ok, err = plat.schedule_remove()
+        core.save_settings(cur)
         for vid in os.listdir(core.SCANS_DIR) if os.path.isdir(core.SCANS_DIR) else []:
             core.prune(vid, cur["keep"])
         for s in STATE.values():
             s["cache"] = {}
         return {"ok": ok, "error": err, "settings": cur, "schedule": plat.schedule_status()}
+
+    # ---------------------------------------------------------- updates & install
+    def api_about(self, b):
+        import updates
+        return {"version": core.VERSION, "frozen": bool(getattr(sys, "frozen", False)), "os": plat.NAME,
+                "installed": updates.is_installed(), "canInstall": updates.can_install(),
+                "update": updates.cached(), "exe": sys.executable if getattr(sys, "frozen", False) else None}
+
+    def api_update_check(self, b):
+        import updates
+        return updates.check(force=bool(b.get("force")))
+
+    def api_update_apply(self, b):
+        import updates
+        return updates.apply()
+
+    def api_install_self(self, b):
+        import updates
+        return updates.install(desktop=bool(b.get("desktop")))
 
     def api_open_folder(self, b):
         p = b.get("which") == "reports" and core.load_settings().get("reportDir")
@@ -1279,6 +1329,11 @@ def watchdog():
 
 def main(open_window=True, port=0):
     core.migrate_v1()
+    try:
+        import updates
+        updates.cleanup_old()            # remove the previous exe left behind by an update
+    except Exception:  # noqa: BLE001
+        pass
     threading.Thread(target=core.warm_indexes, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
@@ -1294,6 +1349,9 @@ def main(open_window=True, port=0):
 
 
 def cli(argv):
+    if "--uninstall" in argv:
+        import updates
+        sys.exit(updates.uninstall_interactive())
     if "--scan" in argv:
         i = argv.index("--scan")
         ids = [a for a in argv[i + 1:] if not a.startswith("--")]

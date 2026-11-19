@@ -15,14 +15,84 @@ class Declined(Exception):
     """The user said no to the Windows permission prompt."""
 
 
-def helper_path():
+def _find(name):
+    if sys.platform == "win32":
+        name += ".exe"
     here = os.path.dirname(os.path.abspath(__file__))
-    for p in (os.path.join(getattr(sys, "_MEIPASS", here), "hoard-mft.exe"),
-              os.path.join(here, "bin", "hoard-mft.exe"),
-              os.path.join(os.path.dirname(here), "native", "target", "release", "hoard-mft.exe")):
+    for p in (os.path.join(getattr(sys, "_MEIPASS", here), name),
+              os.path.join(here, "bin", name),
+              os.path.join(os.path.dirname(here), "native", "target", "release", name)):
         if os.path.isfile(p):
             return p
     return None
+
+
+def helper_path():
+    return _find("hoard-mft") if sys.platform == "win32" else None
+
+
+def walk_available():
+    return not os.environ.get("HOARD_NO_NATIVE") and _find("hoard-walk") is not None
+
+
+def _workdir():
+    import secrets
+    work = os.path.join(core.DATA_DIR, "scan-" + secrets.token_hex(6))
+    os.makedirs(work)
+    out, prog, extmap = (os.path.join(work, n) for n in ("tree.json", "progress.txt", "ext.tsv"))
+    with open(extmap, "w", encoding="utf-8") as f:
+        f.writelines(f"{e}\t{c}\n" for e, c in core.EXT.items())
+    return work, out, prog, extmap
+
+
+def _cleanup(work):
+    for n in ("tree.json", "progress.txt", "ext.tsv"):
+        try:
+            os.remove(os.path.join(work, n))
+        except OSError:
+            pass
+    try:
+        os.rmdir(work)
+    except OSError:
+        pass
+
+
+def walk_scan(v, st):
+    """Parallel scan with the native hoard-walk helper (no admin needed, every OS)."""
+    import subprocess
+    work, out, prog, extmap = _workdir()
+    args = [_find("hoard-walk"), v["root"], out, prog, extmap, "--name", v["name"]]
+    for p in sorted(st.exclude or ()):
+        args += ["--exclude", p]
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            creationflags=0x08000000 if sys.platform == "win32" else 0)
+    try:
+        while proc.poll() is None:
+            if st.cancel:
+                proc.kill()
+                return None
+            time.sleep(0.2)
+            try:
+                with open(prog, encoding="utf-8") as f:
+                    cur, done, _total, nbytes = (f.readline().rstrip("\n").split("\t") + ["0"] * 4)[:4]
+                st.current, st.files, st.bytes = cur, int(done), int(nbytes)
+            except (OSError, ValueError):
+                pass
+        if proc.returncode != 0:
+            err = proc.stderr.read().decode("utf-8", "replace").strip()
+            raise RuntimeError(err or f"hoard-walk exited with {proc.returncode}")
+        try:
+            with open(prog, encoding="utf-8") as f:
+                st.errors = int(f.readline().split("\t")[2])
+        except (OSError, ValueError, IndexError):
+            pass
+        st.current = "Loading…"
+        with open(out, encoding="utf-8") as f:
+            tree = core._dec(json.load(f))
+        st.files, st.bytes, st.cloud = tree.nfiles, tree.size, tree.cloud
+        return tree
+    finally:
+        _cleanup(work)
 
 
 def filesystem(root):

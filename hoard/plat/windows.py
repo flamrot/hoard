@@ -106,7 +106,43 @@ def _x(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def schedule_install(hour, minute, argv):
+class _SEI(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("fMask", ctypes.c_ulong), ("hwnd", wintypes.HWND),
+                ("lpVerb", wintypes.LPCWSTR), ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
+                ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int), ("hInstApp", wintypes.HINSTANCE),
+                ("lpIDList", ctypes.c_void_p), ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
+                ("dwHotKey", wintypes.DWORD), ("hIconOrMonitor", wintypes.HANDLE), ("hProcess", wintypes.HANDLE)]
+
+
+def run_elevated(exe, args, timeout_ms=120000):
+    """Run a program with admin rights (Windows asks first) and wait. Returns its exit code, or None if declined."""
+    info = _SEI()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = 0x40 | 0x400            # NOCLOSEPROCESS | FLAG_NO_UI
+    info.lpVerb, info.lpFile, info.lpParameters, info.nShow = "runas", exe, subprocess.list2cmdline(args), 0
+    sh = ctypes.windll.shell32
+    sh.ShellExecuteExW.argtypes = [ctypes.POINTER(_SEI)]
+    if not sh.ShellExecuteExW(ctypes.byref(info)):
+        return None if ctypes.GetLastError() == 1223 else -1
+    k32 = ctypes.windll.kernel32
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.WaitForSingleObject(info.hProcess, timeout_ms)
+    code = wintypes.DWORD()
+    k32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
+    k32.CloseHandle(info.hProcess)
+    return code.value
+
+
+def is_admin():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def schedule_install(hour, minute, argv, elevated=False):
     import tempfile
     xml = f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -118,7 +154,7 @@ def schedule_install(hour, minute, argv):
       <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
     </CalendarTrigger>
   </Triggers>
-  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>{"HighestAvailable" if elevated else "LeastPrivilege"}</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
@@ -136,14 +172,23 @@ def schedule_install(hour, minute, argv):
   </Actions>
 </Task>
 """
-    fd, path = tempfile.mkstemp(suffix=".xml")
-    os.close(fd)
+    path = os.path.join(tempfile.gettempdir(), f"hoard-task-{os.getpid()}.xml")   # readable when elevated
     try:
         with open(path, "w", encoding="utf-16") as f:
             f.write(xml)
-        r = _run(["schtasks", "/Create", "/TN", TASK, "/XML", path, "/F"])
+        args = ["/Create", "/TN", TASK, "/XML", path, "/F"]
+        if elevated:
+            # a task that runs with admin rights must be registered with admin rights: one prompt, now
+            code = run_elevated("schtasks.exe", args)
+            if code is None:
+                return False, "The permission prompt was declined, so the daily scan wasn't set to use fast scan."
+            return (True, None) if code == 0 else (False, f"Task Scheduler refused the task (code {code}).")
+        r = _run(["schtasks"] + args)
     finally:
-        os.remove(path)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     return (True, None) if r.returncode == 0 else (False, (r.stderr or r.stdout).strip() or "Task Scheduler refused the task.")
 
 
@@ -151,12 +196,19 @@ def schedule_remove():
     if not schedule_status()["installed"]:
         return True, None
     r = _run(["schtasks", "/Delete", "/TN", TASK, "/F"])
-    return (True, None) if r.returncode == 0 else (False, (r.stderr or r.stdout).strip())
+    if r.returncode == 0:
+        return True, None
+    if "denied" in (r.stderr + r.stdout).lower():      # an admin-level task needs admin rights to remove
+        code = run_elevated("schtasks.exe", ["/Delete", "/TN", TASK, "/F"])
+        if code == 0:
+            return True, None
+    return False, (r.stderr or r.stdout).strip()
 
 
 def schedule_status():
-    r = _run(["schtasks", "/Query", "/TN", TASK])
-    return {"installed": r.returncode == 0, "how": f"Task Scheduler → “{TASK}”"}
+    r = _run(["schtasks", "/Query", "/TN", TASK, "/XML"])
+    return {"installed": r.returncode == 0, "elevated": "HighestAvailable" in r.stdout,
+            "how": f"Task Scheduler → “{TASK}”"}
 
 
 def notify(title, body):

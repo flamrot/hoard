@@ -6,6 +6,7 @@ import time
 
 import plat
 
+VERSION = "1.1.0"
 DATA_DIR = plat.DATA_DIR
 SCANS_DIR = os.path.join(DATA_DIR, "scans")
 
@@ -24,7 +25,8 @@ _EXT = {
     4: "jpg jpeg png gif bmp webp tif tiff psd cr2 nef arw dng heic svg ico mp3 wav flac ogg m4a aac wma opus aiff",
     5: "js mjs cjs ts tsx jsx py pyc pyd json map css scss html c h cpp hpp cs java class jar go rs rb php lua sh ps1 bat yml yaml toml lock md wasm o obj idx pack whl rlib",
     6: "pdf doc docx xls xlsx ppt pptx txt rtf odt ods csv epub log pages numbers key",
-    7: "safetensors ckpt gguf ggml pt pth onnx bin h5 tflite pb npz npy mlmodel",
+    # not "bin": games (Path of Exile 2, …) and countless apps use .bin for ordinary data
+    7: "safetensors ckpt gguf ggml pt pth onnx h5 tflite pb npz npy mlmodel",
 }
 EXT = {e: c for c, s in _EXT.items() for e in s.split()}
 
@@ -405,7 +407,10 @@ DEFAULTS = {"schedule": {"enabled": False, "time": "07:00", "volumes": []},
             "watch": [],           # [{"vol", "path": [...], "gb"}]  alert when a folder passes a size
             "reportDir": "",       # save an HTML report here after each daily scan
             "locations": [],       # extra folders / network shares to map: [{"path", "name"}]
-            "fastScan": False}     # Windows: read the NTFS file table directly (needs admin)
+            "fastScan": False,     # Windows: read the NTFS file table directly (needs admin)
+            "scheduleFast": False,  # Windows: the daily scan runs with admin rights and uses the fast scan
+            "updateCheck": True,   # look for a newer release on GitHub at most once a day
+            "updateUrl": "https://api.github.com/repos/flamrot/hoard/releases/latest"}
 
 
 def _read_json(name, default):

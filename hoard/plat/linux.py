@@ -194,7 +194,7 @@ def _crontab(lines=None):
     return subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True, text=True, env=_env())
 
 
-def schedule_install(hour, minute, argv):
+def schedule_install(hour, minute, argv, elevated=False):
     schedule_remove()
     if _systemd_ok():
         os.makedirs(UNIT_DIR, exist_ok=True)

@@ -12,8 +12,16 @@ MAINTAINER="${MAINTAINER:-Hoard Maintainers <hoard@example.invalid>}"
 
 python3 -m pip install --quiet --upgrade pyinstaller
 
+# Parallel native scanner (optional; Hoard falls back to Python without it)
+EXTRA=()
+if command -v cargo >/dev/null; then
+  cargo build --release --manifest-path native/Cargo.toml --bin hoard-walk
+  EXTRA=(--add-binary "$ROOT/native/target/release/hoard-walk:.")
+fi
+
 # One-folder build (starts faster than one-file and packages cleanly)
 python3 -m PyInstaller --noconfirm --clean --windowed --name hoard \
+  ${EXTRA[@]+"${EXTRA[@]}"} \
   --add-data "$ROOT/hoard/ui.html:." \
   --paths "$ROOT/hoard" \
   --distpath "$ROOT/build/dist" --workpath "$ROOT/build/work" --specpath "$ROOT/build" \

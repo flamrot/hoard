@@ -113,7 +113,7 @@ PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LABEL}.plist")
 SCHEDULE_NOTE = "Runs in the background through launchd, even when Hoard is closed. If the Mac is asleep at that time, it runs when it wakes."
 
 
-def schedule_install(hour, minute, argv):
+def schedule_install(hour, minute, argv, elevated=False):
     import plistlib
     os.makedirs(os.path.dirname(PLIST), exist_ok=True)
     with open(PLIST, "wb") as f:
