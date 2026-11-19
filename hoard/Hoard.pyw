@@ -8,9 +8,7 @@ sys.path.insert(0, HERE)
 
 try:
     import server
-    argv = sys.argv
-    server.main(open_window="--no-window" not in argv,
-                port=int(argv[argv.index("--port") + 1]) if "--port" in argv else 0)
+    server.cli(sys.argv)
 except Exception:
     log = os.path.join(os.environ.get("LOCALAPPDATA", HERE), "Hoard", "error.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)

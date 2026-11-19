@@ -128,6 +128,26 @@ def main():
             fail(f"'what grew' should list sub/grew.bin, got {grew}")
         print("scan 2: change detected:", grew)
 
+        hist = api("history", {"drive": vid})["items"]
+        if len(hist) != 2:
+            fail(f"expected 2 saved scans, got {len(hist)}")
+        api("set_baseline", {"drive": vid, "ts": hist[1]["ts"]})
+
+        # the daily schedule runs the app with --scan; do the same, then check the open app picks it up
+        time.sleep(1.1)
+        r = subprocess.run(args + ["--scan", vid], env=env, timeout=180)
+        if r.returncode != 0:
+            fail(f"--scan exited with {r.returncode}")
+        hist = api("history", {"drive": vid})["items"]
+        if len(hist) != 3:
+            fail(f"background scan didn't save a snapshot (have {len(hist)})")
+        if api("open_drive", {"drive": vid})["time"] != hist[0]["ts"]:
+            fail("open app didn't switch to the background scan")
+        rep = api("settings")["report"]
+        if not rep or rep[0]["vol"] != vid or "delta" not in rep[0]:
+            fail(f"background scan wasn't reported: {rep[:1]}")
+        print(f"background scan: saved, picked up, reported (history {len(hist)} scans)")
+
         if do_trash:
             r = api("recycle", {"drive": vid, "path": ["sub", "big.bin"]})
             if not r.get("ok"):

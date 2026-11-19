@@ -33,6 +33,23 @@ scan_excludes = _os.scan_excludes
 trash = _os.trash
 reveal = _os.reveal
 protected = _os.protected
+schedule_install = _os.schedule_install    # (hour, minute, argv) -> (ok, error)
+schedule_remove = _os.schedule_remove      # () -> (ok, error)
+schedule_status = _os.schedule_status      # () -> {"installed": bool, "how": str}
+SCHEDULE_NOTE = _os.SCHEDULE_NOTE
+notify = _os.notify                        # (title, body) -> None, best effort
+
+
+def self_command():
+    """argv that starts this same app again (used for the scheduled scan)."""
+    if getattr(sys, "frozen", False):
+        return [os.environ.get("APPIMAGE") or sys.executable]   # an AppImage runs from a temp mount
+    exe = sys.executable
+    if NAME == "windows":
+        pw = os.path.join(os.path.dirname(exe), "pythonw.exe")   # no console window
+        if os.path.exists(pw):
+            exe = pw
+    return [exe, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py")]
 
 os.makedirs(DATA_DIR, exist_ok=True)
 

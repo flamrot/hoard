@@ -103,6 +103,50 @@ def protected(root, parts, full):
     return None
 
 
+LABEL = "app.hoard.scan"
+PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LABEL}.plist")
+SCHEDULE_NOTE = "Runs in the background through launchd, even when Hoard is closed. If the Mac is asleep at that time, it runs when it wakes."
+
+
+def schedule_install(hour, minute, argv):
+    import plistlib
+    os.makedirs(os.path.dirname(PLIST), exist_ok=True)
+    with open(PLIST, "wb") as f:
+        plistlib.dump({"Label": LABEL, "ProgramArguments": list(argv),
+                       "StartCalendarInterval": {"Hour": hour, "Minute": minute},
+                       "ProcessType": "Background", "LowPriorityIO": True, "Nice": 10}, f)
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", f"{domain}/{LABEL}"], capture_output=True)
+    r = subprocess.run(["launchctl", "bootstrap", domain, PLIST], capture_output=True, text=True)
+    if r.returncode != 0:   # older macOS
+        r = subprocess.run(["launchctl", "load", "-w", PLIST], capture_output=True, text=True)
+    return (True, None) if r.returncode == 0 else (False, r.stderr.strip() or "launchd refused the job.")
+
+
+def schedule_remove():
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    try:
+        os.remove(PLIST)
+    except FileNotFoundError:
+        pass
+    except OSError as ex:
+        return False, str(ex)
+    return True, None
+
+
+def schedule_status():
+    return {"installed": os.path.exists(PLIST), "how": f"launchd agent {LABEL}"}
+
+
+def notify(title, body):
+    try:
+        subprocess.run(["osascript", "-e", "on run argv", "-e",
+                        "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run",
+                        title, body], capture_output=True, timeout=15)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def app_browsers():
     cands = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
              "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",

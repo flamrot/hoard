@@ -168,6 +168,88 @@ def protected(root, parts, full):
     return None
 
 
+UNIT_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "systemd", "user")
+CRON_TAG = "# hoard-daily-scan"
+SCHEDULE_NOTE = "Runs in the background through a systemd user timer (or cron), even when Hoard is closed. With systemd, a scan missed while the computer was off runs at the next start."
+
+
+def _systemd_ok():
+    if not shutil.which("systemctl"):
+        return False
+    return subprocess.run(["systemctl", "--user", "show-environment"], capture_output=True, env=_env()).returncode == 0
+
+
+def _sd_quote(a):
+    return '"' + a.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
+def _crontab(lines=None):
+    if lines is None:
+        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, env=_env())
+        return r.stdout.splitlines() if r.returncode == 0 else []
+    return subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True, text=True, env=_env())
+
+
+def schedule_install(hour, minute, argv):
+    schedule_remove()
+    if _systemd_ok():
+        os.makedirs(UNIT_DIR, exist_ok=True)
+        with open(os.path.join(UNIT_DIR, "hoard-scan.service"), "w") as f:
+            f.write("[Unit]\nDescription=Hoard daily disk scan\n\n[Service]\nType=oneshot\nNice=10\n"
+                    "IOSchedulingClass=idle\nExecStart=" + " ".join(_sd_quote(a) for a in argv) + "\n")
+        with open(os.path.join(UNIT_DIR, "hoard-scan.timer"), "w") as f:
+            f.write(f"[Unit]\nDescription=Run Hoard's daily disk scan\n\n[Timer]\n"
+                    f"OnCalendar=*-*-* {hour:02d}:{minute:02d}:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, env=_env())
+        r = subprocess.run(["systemctl", "--user", "enable", "--now", "hoard-scan.timer"],
+                           capture_output=True, text=True, env=_env())
+        return (True, None) if r.returncode == 0 else (False, r.stderr.strip())
+    if shutil.which("crontab"):
+        cmd = " ".join(quote_sh(a) for a in argv)
+        r = _crontab([ln for ln in _crontab() if CRON_TAG not in ln] + [f"{minute} {hour} * * * {cmd} {CRON_TAG}"])
+        return (True, None) if r.returncode == 0 else (False, r.stderr.strip())
+    return False, "Neither systemd nor cron is available to schedule the scan."
+
+
+def quote_sh(a):
+    import shlex
+    return shlex.quote(a)
+
+
+def schedule_remove():
+    timer = os.path.join(UNIT_DIR, "hoard-scan.timer")
+    if os.path.exists(timer):
+        subprocess.run(["systemctl", "--user", "disable", "--now", "hoard-scan.timer"], capture_output=True, env=_env())
+        for n in ("hoard-scan.timer", "hoard-scan.service"):
+            try:
+                os.remove(os.path.join(UNIT_DIR, n))
+            except OSError:
+                pass
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, env=_env())
+    if shutil.which("crontab"):
+        lines = _crontab()
+        if any(CRON_TAG in ln for ln in lines):
+            _crontab([ln for ln in lines if CRON_TAG not in ln])
+    return True, None
+
+
+def schedule_status():
+    if os.path.exists(os.path.join(UNIT_DIR, "hoard-scan.timer")):
+        return {"installed": True, "how": "systemd user timer hoard-scan.timer"}
+    if shutil.which("crontab") and any(CRON_TAG in ln for ln in _crontab()):
+        return {"installed": True, "how": "cron"}
+    return {"installed": False, "how": ""}
+
+
+def notify(title, body):
+    if shutil.which("notify-send"):
+        try:
+            subprocess.run(["notify-send", "-a", "Hoard", "-i", "drive-harddisk", title, body],
+                           capture_output=True, timeout=15, env=_env())
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def app_browsers():
     from . import which_all
     return which_all(["google-chrome", "google-chrome-stable", "chromium", "chromium-browser",

@@ -25,6 +25,13 @@ The app only listens on `127.0.0.1` and every request needs a per-launch token. 
 - Right-click for **Open**, **Show in Explorer/Finder/Files**, **Copy path** and **Move to Recycle Bin/Trash** (**Del**, or **⌘⌫** on macOS).
 - Click a type under **What's in here** to highlight it on the map.
 - System folders and the top level of the system disk can't be deleted from Hoard.
+- A running scan can be **hidden**: it continues in the header while you keep using the map.
+- **Settings** (gear icon): scan chosen disks automatically every day at a set time, get a notification when a disk grows by more than a set amount, choose how many scans to keep, and pick light/dark/system appearance.
+- Every scan is kept (up to your limit). Use the **vs** picker in the toolbar to compare with any earlier scan.
+
+### Daily scans
+The daily scan is registered with the operating system, so it runs even when Hoard is closed:
+Windows Task Scheduler ("Hoard daily scan"), a launchd agent on macOS (`app.hoard.scan`), or a systemd user timer on Linux (`hoard-scan.timer`, with cron as a fallback). It runs `Hoard --scan`, which scans, saves, prunes old scans and notifies, then exits. Turning it off in Settings removes it.
 
 Saved scans live in `%LOCALAPPDATA%\Hoard` (Windows), `~/Library/Application Support/Hoard` (macOS), or `~/.local/share/hoard` (Linux).
 

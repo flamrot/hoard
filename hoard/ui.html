@@ -144,14 +144,16 @@ main { display: grid; grid-template-columns: minmax(0,1fr) 360px; min-height: 0;
 #ov { cursor: default; }
 #state {
   position: absolute; inset: 0; display: none; place-items: center; padding: 24px;
+  grid-template-columns: minmax(0, 1fr);   /* long scan paths must not widen the column and re-center the card */
   background: color-mix(in srgb, var(--surface) 72%, transparent); backdrop-filter: blur(6px);
 }
 #state.show { display: grid; animation: fade .2s ease-out; }
 @keyframes fade { from { opacity: 0 } }
 .card {
-  width: min(460px, 100%); background: var(--surface); border: 1px solid var(--line);
+  width: min(460px, 100%); min-width: 0; background: var(--surface); border: 1px solid var(--line);
   border-radius: 14px; padding: 28px; box-shadow: var(--shadow);
 }
+.card .row-actions { display: flex; gap: 8px; }
 .card h2 { margin: 0 0 6px; font-size: 20px; letter-spacing: -.015em; font-weight: 650; }
 .card p { margin: 0 0 18px; color: var(--ink-2); }
 .card .big { font-size: 40px; font-weight: 650; letter-spacing: -.03em; line-height: 1.1; }
@@ -273,6 +275,83 @@ dialog .row-actions { display: flex; justify-content: flex-end; gap: 8px; margin
 }
 .toast small { display: block; opacity: .75; }
 .toast.error { background: var(--danger); color: #fff; }
+
+/* ---------- scan chip (minimized scan) */
+.scanchip {
+  display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft);
+  cursor: pointer; font-weight: 500; animation: fade .2s ease-out;
+}
+.scanchip[hidden] { display: none; }
+#map.busy #cv { filter: blur(3px); opacity: .7; transition: filter .2s, opacity .2s; }
+#map.busy::after {
+  content: ""; position: absolute; top: 14px; right: 14px; width: 18px; height: 18px; z-index: 2;
+  border: 2px solid var(--line-2); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+}
+@media (max-width: 1100px) {
+  .scanchip .minibar { display: none; }
+  .drive { min-width: 0; }
+  .dn b { display: none; }
+  header { gap: 10px; }
+}
+.scanchip:hover { border-color: var(--accent); }
+.scanchip .minibar { width: 56px; height: 4px; border-radius: 2px; background: var(--line-2); overflow: hidden; }
+.scanchip .minibar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease-out; }
+.spinner.sm { width: 14px; height: 14px; }
+.btn.icon { width: 32px; padding: 0; justify-content: center; }
+.btn.icon svg { width: 17px; height: 17px; }
+
+/* ---------- compare picker */
+.cmp { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-3); }
+.cmp select {
+  font: inherit; color: var(--ink-2); background: var(--hover); border: 1px solid transparent; border-radius: 999px;
+  padding: 2px 8px; cursor: pointer; max-width: 210px;
+}
+.cmp select:hover { border-color: var(--line-2); }
+
+/* ---------- settings */
+dialog.wide { width: min(580px, calc(100% - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+.set { padding: 16px 0; border-top: 1px solid var(--line); }
+.set:first-of-type { border-top: 0; padding-top: 4px; }
+.set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.set-row b { font-weight: 600; }
+.set small { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; max-width: 380px; }
+.set select, .set input[type="time"] {
+  font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line-2);
+  border-radius: 6px; height: 32px; padding: 0 8px;
+}
+.set-sub { display: grid; gap: 12px; margin-top: 14px; padding: 14px; border-radius: 10px; background: var(--surface-2); transition: opacity .15s; }
+.set-sub.off { opacity: .45; pointer-events: none; }
+.field { display: flex; align-items: center; gap: 12px; color: var(--ink-2); }
+.field > span:first-child { width: 48px; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px; }
+.checks label {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line-2);
+  border-radius: 999px; cursor: pointer; font-size: 12.5px;
+}
+.checks label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.checks input { accent-color: var(--accent); margin: 0; }
+.status-line { font-size: 12.5px; color: var(--ink-2); }
+.status-line.ok::before { content: "✓ "; color: var(--shrink); font-weight: 700; }
+.status-line.warn::before { content: "! "; color: var(--grow); font-weight: 700; }
+.switch { position: relative; width: 40px; height: 22px; flex: none; }
+.switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--line-2); transition: background .15s; pointer-events: none; }
+.switch span::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s;
+}
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::after { transform: translateX(18px); }
+.switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line-2); }
+.seg button { border: 0; background: none; padding: 5px 12px; border-radius: 6px; cursor: pointer; color: var(--ink-2); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.report { display: grid; gap: 2px; margin-top: 10px; }
+.report div { display: flex; gap: 10px; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); }
+.report div span:first-child { width: 118px; flex: none; color: var(--ink-3); }
+.report div span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.form-error { color: var(--danger); font-size: 12.5px; margin-top: 10px; }
 @keyframes up { from { opacity: 0; transform: translateY(8px) } }
 
 @media (max-width: 900px) {
@@ -293,7 +372,13 @@ dialog .row-actions { display: flex; justify-content: flex-end; gap: 8px; margin
   </div>
   <nav id="drives" aria-label="Drives"></nav>
   <div class="hstatus">
+    <button class="scanchip" id="scanChip" hidden title="Show scan progress">
+      <span class="spinner sm"></span><span id="scanChipText" class="num">Scanning…</span><span class="minibar"><i id="scanChipBar"></i></span>
+    </button>
     <span id="status"></span>
+    <button class="btn ghost icon" id="settingsBtn" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/></svg>
+    </button>
     <button class="btn primary" id="scanBtn" disabled>
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></svg>
       <span>Scan</span>
@@ -377,7 +462,16 @@ function ago(t) {
   if (s < 172800) return "yesterday";
   return Math.round(s / 86400) + " days ago";
 }
-const day = t => new Date(t * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+function when(t) {
+  const d = new Date(t * 1000), now = new Date();
+  const hm = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const days = Math.round((new Date(now.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (days === 0) return "today " + hm;
+  if (days === 1) return "yesterday " + hm;
+  if (days > 1 && days < 7) return d.toLocaleDateString(undefined, { weekday: "short" }) + " " + hm;
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
+}
+const day = t => when(t);
 function deltaHTML(n, cls = "chip") {
   if (n.d === undefined || !S.meta?.prevTime) return "";
   const since = " since " + day(S.meta.prevTime);
@@ -647,7 +741,9 @@ async function loadView(path, opts = {}) {
   tip.style.display = "none"; S.hover = null;
   if (opts.fromRect && !reduced && S.view) await zoomInFx(opts.fromRect);
   let r;
+  const busy = setTimeout(() => map.classList.add("busy"), 150);   // e.g. while a scan keeps the CPU busy
   try { r = await req; } catch (e) { toast(e.message, "error"); return; }
+  finally { clearTimeout(busy); map.classList.remove("busy"); }
   if (my !== navToken) return;
   if (r.none) { S.view = null; showState("empty"); renderAll(); return; }
   if (r.missing) { toast("That folder isn't in the scan anymore."); return loadView([]); }
@@ -667,7 +763,7 @@ async function loadView(path, opts = {}) {
 }
 function zoomInto(path, rect) { closeMenu(); return loadView(path, { fromRect: rect }); }
 function goUp() {
-  if (!S.path.length || S.scanning) return;
+  if (!S.path.length) return;
   const child = S.path[S.path.length - 1];
   loadView(S.path.slice(0, -1), { outFrom: child, select: child });
 }
@@ -707,7 +803,7 @@ function renderStatus() {
 }
 function renderCrumbs() {
   const el = $("#crumbs"); el.innerHTML = "";
-  $("#up").disabled = !S.view || !S.path.length || S.scanning;
+  $("#up").disabled = !S.view || !S.path.length;
   if (!S.drive) return;
   const parts = [vol().name].concat(S.path);
   parts.forEach((p, i) => {
@@ -721,9 +817,23 @@ function renderCrumbs() {
   if (!S.view) { vs.innerHTML = ""; return; }
   let html = "";
   if (S.meta.partial) html += `<span class="chip note" title="This came from an earlier summary scan. Rescan for every folder and file.">Summary scan · rescan for full detail</span>`;
+  const hist = S.hist?.items || [];
+  if (hist.length > 1) {
+    html += `<label class="cmp" title="Which earlier scan to compare with">vs <select id="cmpSel">${hist.slice(1).map(h =>
+      `<option value="${h.ts}" ${h.ts === S.meta.prevTime ? "selected" : ""}>${esc(when(h.ts))}${h.total ? " · " + fmt(h.total) : ""}${h.partial ? " (summary)" : ""}</option>`).join("")}</select></label>`;
+  }
   html += deltaHTML(S.view);
   html += `<span class="total num">${fmt(S.view.s)}</span>`;
   vs.innerHTML = html;
+  const cmp = $("#cmpSel");
+  if (cmp) cmp.onchange = async () => {
+    try {
+      const r = await api("set_baseline", { drive: S.drive, ts: +cmp.value });
+      S.meta.prevTime = r.prevTime; S.lists = {};
+      await loadView(S.path);
+      toast(`Comparing with the scan from ${when(r.prevTime)}`);
+    } catch (e) { toast(e.message, "error"); }
+  };
 }
 function renderSel() {
   const el = $("#sel");
@@ -852,7 +962,9 @@ async function act(what, path, n) {
   if (what === "recycle") return confirmRecycle(path, n);
 }
 function confirmRecycle(path, n) {
+  if (S.scanning) return toast("Wait for the scan to finish before removing things.", "error");
   const d = $("#dlg");
+  d.classList.remove("wide");
   const bin = S.trashName;
   d.innerHTML = `<h3>Move “${esc(n.n)}” to the ${bin}?</h3>
     <div class="dpath">${esc(fullPath(path))}</div>
@@ -944,9 +1056,36 @@ function showState(kind, data) {
       <div class="progress" id="scBar"><i></i></div>
       <div class="scanmeta num"><span id="scFiles">Starting…</span><span id="scTime"></span></div>
       <div class="ticker" id="scCur"><span></span></div>
-      <button class="btn" id="scCancel">Cancel</button></div>`;
+      <div class="row-actions">
+        ${S.view ? `<button class="btn primary" id="scHide" title="Keep scanning in the background and use the map">Hide</button>` : ""}
+        <button class="btn" id="scCancel">Cancel scan</button>
+      </div></div>`;
     $("#scCancel").onclick = async () => { $("#scCancel").disabled = true; await api("cancel"); };
+    const hide = $("#scHide");
+    if (hide) hide.onclick = () => { S.scanMin = true; hideState(); updateScanUI(S.lastProg); };
+    updateScanUI(S.lastProg);
   }
+}
+$("#scanChip").onclick = () => { S.scanMin = false; showState("scan"); updateScanUI(S.lastProg); };
+
+/* progress shows in the modal, or in the header chip once the modal is hidden */
+function updateScanUI(p) {
+  const chip = $("#scanChip");
+  chip.hidden = !(S.scanning && S.scanMin);
+  if (!p || !S.scanning) return;
+  const pct = p.used ? Math.min(99, p.bytes / p.used * 100) : 0;
+  if (S.scanMin) {
+    $("#scanChipText").textContent = `Scanning ${vol().name} · ${Math.round(pct)}%`;
+    $("#scanChipBar").style.width = pct + "%";
+    return;
+  }
+  if (!$("#scBar")) return;
+  targetBytes = p.bytes; if (!rafId) rafId = requestAnimationFrame(animateBytes);
+  $("#scOf").textContent = p.used ? ` of ~${fmt(p.used)}` : "";
+  $("#scBar i").style.width = pct + "%";
+  $("#scFiles").textContent = p.cancelled ? "Stopping…" : `${p.files.toLocaleString()} files`;
+  const s = Math.round(p.elapsed); $("#scTime").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  $("#scCur span").textContent = p.current || "";
 }
 function hideState() { stateEl.classList.remove("show"); stateEl.innerHTML = ""; }
 function showStateMessage(title, text) {
@@ -968,7 +1107,7 @@ async function startScan() {
     const r = await api("scan", { drive: S.drive });
     if (r.error) return toast(r.error, "error");
   } catch (e) { return toast(e.message, "error"); }
-  S.scanning = true; shownBytes = targetBytes = 0;
+  S.scanning = true; S.scanMin = false; S.lastProg = null; shownBytes = targetBytes = 0;
   closeMenu(); tip.style.display = "none";
   showState("scan"); renderAll();
   poll();
@@ -977,18 +1116,13 @@ async function poll() {
   let p;
   try { p = await api("progress"); } catch (e) { toast(e.message, "error"); return; }
   if (p.running) {
-    targetBytes = p.bytes; if (!rafId) rafId = requestAnimationFrame(animateBytes);
-    const pct = p.used ? Math.min(99, p.bytes / p.used * 100) : 0;
-    $("#scOf").textContent = p.used ? ` of ~${fmt(p.used)}` : "";
-    $("#scBar i").style.width = pct + "%";
-    $("#scFiles").textContent = `${p.files.toLocaleString()} files`;
-    const s = Math.round(p.elapsed); $("#scTime").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-    $("#scCur span").textContent = p.current || "";
-    if (p.cancelled) { $("#scFiles").textContent = "Stopping…"; }
+    S.lastProg = p;
+    updateScanUI(p);
     setTimeout(poll, 250);
     return;
   }
-  S.scanning = false;
+  S.scanning = false; S.scanMin = false; S.lastProg = null;
+  updateScanUI(null);
   if (p.error) { toast("The scan failed: " + p.error, "error"); }
   else if (p.cancelled) { toast("Scan cancelled. Nothing was saved."); }
   else {
@@ -996,6 +1130,7 @@ async function poll() {
     S.meta = await api("open_drive", { drive: S.drive });
     refreshDrives();
     if (S.meta.prevTime) { S.tab = "changes"; document.querySelectorAll(".tabs button").forEach(x => x.setAttribute("aria-selected", x.dataset.tab === "changes")); }
+    await loadHistory();
     await loadView([]);
     return;
   }
@@ -1009,19 +1144,116 @@ async function refreshDrives() {
     const r = await api("drives");
     Object.assign(S, { drives: r.drives, os: r.os, sep: r.sep, trashName: r.trashName, revealName: r.revealName });
     document.documentElement.dataset.os = r.os;
+    if (r.theme !== S.theme) applyTheme(r.theme);
   } catch (e) { toast(e.message, "error"); }
   renderDrives();
 }
+async function loadHistory() {
+  try { S.hist = await api("history", { drive: S.drive }); } catch { S.hist = null; }
+  if (S.view) renderCrumbs();
+}
 async function selectDrive(L) {
-  S.drive = L; S.path = []; S.view = null; S.sel = null; S.focusCat = null; S.lists = {}; S.meta = null;
+  S.drive = L; S.path = []; S.view = null; S.sel = null; S.focusCat = null; S.lists = {}; S.meta = null; S.hist = null;
   S.rects = []; draw(); drawOverlay();
   renderAll(); showState("loading");
   try { S.meta = await api("open_drive", { drive: L }); } catch (e) { toast(e.message, "error"); return; }
   renderStatus();
   if (!S.meta.has) { showState("empty"); renderAll(); return; }
+  await loadHistory();
   await loadView([]);
 }
 $("#scanBtn").onclick = startScan;
+
+/* a scheduled scan may have run while Hoard was open: pick it up */
+async function checkForNewScan() {
+  if (S.scanning || !S.drive || !S.meta?.has || $("#dlg").open) return;
+  await refreshDrives();
+  const v = S.drives.find(d => d.id === S.drive);
+  if (v && v.scanned && v.scanned !== S.meta.time) {
+    S.meta = await api("open_drive", { drive: S.drive });
+    await loadHistory();
+    await loadView(S.path);
+    toast(`Loaded the newer scan from ${when(v.scanned)}`);
+  }
+}
+addEventListener("focus", checkForNewScan);
+setInterval(checkForNewScan, 120000);
+
+/* ------------------------------------------------------------------ theme & settings */
+function applyTheme(t) {
+  S.theme = t;
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  readColors();
+  if (S.view) { draw(); drawOverlay(); renderComp(); }
+}
+function nextRun(hm) {
+  const [h, m] = hm.split(":").map(Number), n = new Date(), t = new Date();
+  t.setHours(h, m, 0, 0);
+  const today = t > n;
+  return `${today ? "today" : "tomorrow"} at ${t.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+}
+async function openSettings() {
+  let r;
+  try { r = await api("settings"); } catch (e) { return toast(e.message, "error"); }
+  const st = r.settings, d = $("#dlg"), themeBefore = S.theme;
+  let theme = st.theme, saved = false;
+  const disks = S.drives.filter(x => x.type !== "folder");
+  const chosen = new Set(st.schedule.volumes.length ? st.schedule.volumes : [S.drive]);
+  const opt = (vals, cur, label) => vals.map(v => `<option value="${v}" ${+v === +cur ? "selected" : ""}>${label(v)}</option>`).join("");
+  const report = (r.report || []).map(e => {
+    const top = e.top && e.top[0];
+    const change = e.delta === undefined ? `${fmt(e.total)} scanned` : `${e.delta >= 0 ? "▲" : "▼"} ${fmt(Math.abs(e.delta))}`;
+    return `<div><span>${esc(when(e.time))}</span><span>${esc(e.name)} · ${change}${top ? ` · ${esc(top.p[top.p.length - 1])} +${fmt(top.d)}` : ""}</span></div>`;
+  }).join("");
+  const sch = r.schedule;
+  d.classList.add("wide");
+  d.innerHTML = `<h3>Settings</h3>
+    <section class="set">
+      <div class="set-row"><div><b>Scan automatically every day</b><small>${esc(r.scheduleNote)}</small></div>
+        <label class="switch"><input type="checkbox" id="stOn" ${st.schedule.enabled ? "checked" : ""} aria-label="Scan automatically every day"><span></span></label></div>
+      <div class="set-sub ${st.schedule.enabled ? "" : "off"}" id="stSub">
+        <div class="field"><span>Time</span><input type="time" id="stTime" value="${esc(st.schedule.time)}" required></div>
+        <div class="field"><span>Disks</span><div class="checks">${disks.map(v =>
+          `<label><input type="checkbox" value="${esc(v.id)}" ${chosen.has(v.id) ? "checked" : ""}>${esc(v.name)}</label>`).join("")}</div></div>
+        <div class="status-line ${sch.installed ? "ok" : st.schedule.enabled ? "warn" : ""}" id="stStatus">${
+          sch.installed ? `Scheduled — next scan ${nextRun(st.schedule.time)}` : st.schedule.enabled ? "Not registered with the system yet. Save to try again." : "Off"}</div>
+      </div>
+    </section>
+    <section class="set"><div class="set-row"><div><b>Tell me when a disk grows by more than</b><small>Checked after each daily scan. Shows a system notification.</small></div>
+      <select id="stNotify">${opt([0, 0.5, 1, 2, 5, 10], st.notifyGB, v => +v ? (v < 1 ? v * 1000 + " MB" : v + " GB") : "Never")}</select></div></section>
+    <section class="set"><div class="set-row"><div><b>Keep scan history</b><small>Older scans are deleted automatically. Saved scans now use ${fmt(r.storage)}.</small></div>
+      <select id="stKeep">${opt([7, 14, 30, 60, 90], st.keep, v => v + " scans")}</select></div></section>
+    <section class="set"><div class="set-row"><div><b>Appearance</b></div>
+      <div class="seg" id="stTheme">${["system", "light", "dark"].map(t => `<button type="button" data-t="${t}" aria-pressed="${t === theme}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div></div></section>
+    ${report ? `<section class="set"><b>Recent automatic scans</b><div class="report">${report}</div></section>` : ""}
+    <div class="form-error" id="stErr" hidden></div>
+    <div class="row-actions"><button class="btn" id="stCancel">Cancel</button><button class="btn primary" id="stSave">Save</button></div>`;
+  const on = $("#stOn");
+  on.onchange = () => $("#stSub").classList.toggle("off", !on.checked);
+  d.querySelectorAll("#stTheme button").forEach(b => b.onclick = () => {
+    theme = b.dataset.t; applyTheme(theme);
+    d.querySelectorAll("#stTheme button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  });
+  $("#stCancel").onclick = () => d.close();
+  $("#stSave").onclick = async () => {
+    const err = $("#stErr"), btn = $("#stSave");
+    const body = { settings: {
+      schedule: { enabled: on.checked, time: $("#stTime").value,
+                  volumes: [...d.querySelectorAll(".checks input:checked")].map(x => x.value) },
+      notifyGB: +$("#stNotify").value, keep: +$("#stKeep").value, theme } };
+    btn.disabled = true; err.hidden = true;
+    try {
+      const res = await api("save_settings", body);
+      if (res.error) { err.textContent = res.error; err.hidden = false; btn.disabled = false; return; }
+      saved = true; d.close();
+      toast(on.checked ? `Daily scan set for ${nextRun(body.settings.schedule.time)} and every day after` : "Settings saved");
+    } catch (e) { err.textContent = e.message; err.hidden = false; btn.disabled = false; }
+  };
+  d.onclose = () => { d.classList.remove("wide"); d.onclose = null; if (!saved && S.theme !== themeBefore) applyTheme(themeBefore); };
+  d.showModal();
+}
+$("#settingsBtn").onclick = openSettings;
 
 setInterval(() => api("ping").catch(() => {}), 20000);
 addEventListener("pagehide", () => navigator.sendBeacon("/api/bye", ""));
@@ -1029,9 +1261,16 @@ addEventListener("pagehide", () => navigator.sendBeacon("/api/bye", ""));
 (async () => {
   sizeCanvas(); readColors();
   await refreshDrives();
-  const sys = S.drives.find(d => d.id === "C" || d.id === "root") || S.drives[0];
-  if (sys) selectDrive(sys.id);
-  else showStateMessage("No disks found", "Hoard couldn't find any disks it can read.");
+  const running = await api("progress").catch(() => ({}));
+  const sys = (running.running && S.drives.find(d => d.id === running.drive))
+    || S.drives.find(d => d.id === "C" || d.id === "root") || S.drives[0];
+  if (!sys) return showStateMessage("No disks found", "Hoard couldn't find any disks it can read.");
+  await selectDrive(sys.id);
+  if (running.running) {            // the window was reloaded mid-scan: pick the scan back up
+    S.scanning = true; S.scanMin = !!S.view; S.lastProg = running;
+    if (S.scanMin) updateScanUI(running); else showState("scan");
+    renderAll(); poll();
+  }
 })();
 </script>
 </body>

@@ -2,12 +2,14 @@
 
 Runs a tiny HTTP server on 127.0.0.1 that scans volumes and serves the UI; the UI opens in a native
 window (pywebview) when available, otherwise in a Chromium-style app window or the default browser.
+`--scan [ids…]` runs a headless scan (used by the daily schedule) and exits.
 Standard library only; OS-specific code lives in plat/.
 """
 import gzip
 import heapq
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -21,6 +23,7 @@ import plat  # noqa: E402
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 RES_DIR = getattr(sys, "_MEIPASS", APP_DIR)   # inside a PyInstaller bundle, data files live here
 DATA_DIR = plat.DATA_DIR
+SCANS_DIR = os.path.join(DATA_DIR, "scans")
 
 KEEP_FILE = 1 << 20      # files >= 1 MB are kept individually; smaller ones are aggregated
 MAX_FILES = 300          # max individual files kept per folder
@@ -56,6 +59,14 @@ def dominant(cats):
         if v > cats[best]:
             best = i
     return best
+
+
+def human(b):
+    a = abs(b)
+    for unit, n in (("TB", 1 << 40), ("GB", 1 << 30), ("MB", 1 << 20)):
+        if a >= n:
+            return f"{b / n:.1f} {unit}"
+    return f"{b / 1024:.0f} KB"
 
 
 # ---------------------------------------------------------------- tree
@@ -155,7 +166,13 @@ def scan_dir(path, name, st):
     return node
 
 
-# ---------------------------------------------------------------- persistence
+def scan_volume(v, st):
+    st.exclude = {os.path.normpath(p) for p in plat.scan_excludes(v["root"])}
+    return scan_dir(v["root"], v["name"], st)
+
+
+# ---------------------------------------------------------------- snapshots (scan history)
+# scans/<volume id>/<unix time>.json.gz  —  line 1: meta JSON, line 2: the tree
 def _enc(n):
     return [n.name, n.size, n.nfiles, n.cats, n.osize, n.ocount,
             [list(f) for f in n.files], [_enc(d) for d in n.dirs]]
@@ -169,48 +186,142 @@ def _dec(a):
     return n
 
 
-def cache_path(vol, which):
-    return os.path.join(DATA_DIR, f"scan_{vol}.{which}.json.gz")
+def vol_dir(vid):
+    return os.path.join(SCANS_DIR, vid)
 
 
-def save_tree(vol, which, tree, when, partial=False):
-    p = cache_path(vol, which)
+def snap_path(vid, ts):
+    return os.path.join(vol_dir(vid), f"{int(ts)}.json.gz")
+
+
+def list_snaps(vid):
+    """Snapshot timestamps for a volume, newest first."""
+    try:
+        names = os.listdir(vol_dir(vid))
+    except OSError:
+        return []
+    return sorted((int(n[:-8]) for n in names if n.endswith(".json.gz") and n[:-8].isdigit()), reverse=True)
+
+
+def new_ts(vid):
+    """Timestamp for a new snapshot: now, but always after the newest one (two scans can finish in the same second)."""
+    snaps = list_snaps(vid)
+    return max(int(time.time()), (snaps[0] + 1) if snaps else 0)
+
+
+def save_snapshot(vid, tree, when, partial=False):
+    os.makedirs(vol_dir(vid), exist_ok=True)
+    p = snap_path(vid, when)
     tmp = p + ".tmp"
     with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=1) as f:
-        json.dump({"v": 1, "time": when, "partial": partial, "root": _enc(tree)}, f, separators=(",", ":"))
+        f.write(json.dumps({"v": 2, "time": int(when), "total": tree.size, "files": tree.nfiles,
+                            "partial": partial}) + "\n")
+        json.dump(_enc(tree), f, separators=(",", ":"))
     os.replace(tmp, p)
 
 
-def load_meta_tree(vol, which):
-    p = cache_path(vol, which)
-    if not os.path.exists(p):
-        return None
+def snap_meta(vid, ts):
     try:
-        with gzip.open(p, "rt", encoding="utf-8") as f:
+        with gzip.open(snap_path(vid, ts), "rt", encoding="utf-8") as f:
+            return json.loads(f.readline())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load_snapshot(vid, ts):
+    try:
+        with gzip.open(snap_path(vid, ts), "rt", encoding="utf-8") as f:
+            meta = json.loads(f.readline())
+            tree = _dec(json.loads(f.read()))
+        return tree, meta
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def prune(vid, keep):
+    for ts in list_snaps(vid)[max(2, keep):]:
+        try:
+            os.remove(snap_path(vid, ts))
+        except OSError:
+            pass
+
+
+def migrate_v1():
+    """Move scans saved by the first version (scan_<id>.latest/prev.json.gz) into scans/<id>/."""
+    try:
+        names = os.listdir(DATA_DIR)
+    except OSError:
+        return
+    for n in names:
+        m = re.fullmatch(r"scan_(.+)\.(latest|prev)\.json\.gz", n)
+        if not m:
+            continue
+        p = os.path.join(DATA_DIR, n)
+        try:
+            with gzip.open(p, "rt", encoding="utf-8") as f:
+                d = json.load(f)
+            save_snapshot(m.group(1), _dec(d["root"]), d["time"], d.get("partial", False))
+            os.remove(p)
+        except Exception:  # noqa: BLE001 - leave the old file in place and note why
+            import traceback
+            with open(os.path.join(DATA_DIR, "error.log"), "a", encoding="utf-8") as log:
+                log.write(f"{time.ctime()} migrating {n}:\n{traceback.format_exc()}\n")
+
+
+def storage_bytes():
+    total = 0
+    for root, _dirs, files in os.walk(SCANS_DIR):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+# ---------------------------------------------------------------- settings & report
+DEFAULTS = {"schedule": {"enabled": False, "time": "07:00", "volumes": []},
+            "keep": 30, "notifyGB": 1.0, "theme": "system"}
+
+
+def load_settings():
+    s = json.loads(json.dumps(DEFAULTS))
+    try:
+        with open(os.path.join(DATA_DIR, "settings.json"), encoding="utf-8") as f:
             d = json.load(f)
-        return {"tree": _dec(d["root"]), "time": d["time"], "partial": d.get("partial", False)}
-    except Exception:  # noqa: BLE001
-        return None
+        s.update({k: v for k, v in d.items() if k in s and k != "schedule"})
+        s["schedule"].update({k: v for k, v in d.get("schedule", {}).items() if k in s["schedule"]})
+    except (OSError, ValueError):
+        pass
+    return s
 
 
-def cache_time(vol, which):
-    """Read just the timestamp without decoding the tree (it's near the start of the file)."""
-    p = cache_path(vol, which)
-    if not os.path.exists(p):
-        return None
+def save_settings(s):
+    p = os.path.join(DATA_DIR, "settings.json")
+    with open(p + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(s, f, indent=2)
+    os.replace(p + ".tmp", p)
+
+
+def read_report():
     try:
-        with gzip.open(p, "rt", encoding="utf-8") as f:
-            head = f.read(200)
-        i = head.index('"time":') + 7
-        j = head.index(",", i)
-        return float(head[i:j])
-    except Exception:  # noqa: BLE001
-        return os.path.getmtime(p)
+        with open(os.path.join(DATA_DIR, "report.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def append_report(entry):
+    r = (read_report() + [entry])[-100:]
+    p = os.path.join(DATA_DIR, "report.json")
+    with open(p + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(r, f)
+    os.replace(p + ".tmp", p)
 
 
 # ---------------------------------------------------------------- volumes & state
 LOCK = threading.RLock()
-STATE = {}          # vol id -> {"cur", "cur_time", "cur_partial", "prev", "prev_time", "prev_partial", "changes"}
+STATE = {}          # vol id -> see drive_state()
 JOB = {"scan": None}
 VOLS = {}           # vol id -> volume dict from plat.list_volumes()
 
@@ -227,7 +338,9 @@ def volumes():
         VOLS.clear()
         VOLS.update({v["id"]: v for v in vs})
     for v in vs:
-        v["scanned"] = cache_time(v["id"], "latest")
+        snaps = list_snaps(v["id"])
+        v["scanned"] = snaps[0] if snaps else None
+        v["scans"] = len(snaps)
     return vs
 
 
@@ -244,19 +357,39 @@ def full_path(vid, parts):
     return os.path.join(vol(vid)["root"], *parts)
 
 
-def drive_state(vid, load=True):
+def _tree(s, vid, ts):
+    """Load a snapshot through a small per-volume cache (current + baseline + one spare)."""
+    if ts in s["trees"]:
+        return s["trees"][ts]
+    tree, meta = load_snapshot(vid, ts)
+    if tree is None:
+        return None, False
+    s["trees"][ts] = (tree, bool(meta.get("partial")))
+    while len(s["trees"]) > 3:
+        drop = min(t for t in s["trees"] if t not in (s["cur_ts"], ts))
+        del s["trees"][drop]
+    return s["trees"][ts]
+
+
+def drive_state(vid):
+    """Current scan = newest snapshot; baseline = the one the user picked, else the scan before it.
+    Picks up snapshots written by the background (scheduled) scan automatically."""
     with LOCK:
         s = STATE.get(vid)
-        if s is None and load:
-            s = {"cur": None, "cur_time": None, "cur_partial": False, "prev": None, "prev_time": None,
-                 "prev_partial": False, "changes": None}
-            c = load_meta_tree(vid, "latest")
-            if c:
-                s["cur"], s["cur_time"], s["cur_partial"] = c["tree"], c["time"], c["partial"]
-            p = load_meta_tree(vid, "prev")
-            if p:
-                s["prev"], s["prev_time"], s["prev_partial"] = p["tree"], p["time"], p["partial"]
-            STATE[vid] = s
+        if s is None:
+            s = STATE[vid] = {"cur": None, "cur_ts": None, "cur_partial": False, "prev": None, "prev_ts": None,
+                              "prev_partial": False, "base_pick": None, "changes": None, "trees": {}}
+        snaps = list_snaps(vid)
+        newest = snaps[0] if snaps else None
+        if newest != s["cur_ts"]:
+            s["cur_ts"] = newest
+            s["cur"], s["cur_partial"] = _tree(s, vid, newest) if newest else (None, False)
+            s["changes"] = None
+        want = s["base_pick"] if s["base_pick"] in snaps[1:] else (snaps[1] if len(snaps) > 1 else None)
+        if want != s["prev_ts"]:
+            s["prev_ts"] = want
+            s["prev"], s["prev_partial"] = _tree(s, vid, want) if want else (None, False)
+            s["changes"] = None
         return s
 
 
@@ -264,29 +397,72 @@ def run_scan(vid):
     st = JOB["scan"]
     try:
         v = vol(vid)
-        st.exclude = {os.path.normpath(p) for p in plat.scan_excludes(v["root"])}
-        tree = scan_dir(v["root"], v["name"], st)
+        tree = scan_volume(v, st)
         if st.cancel:
             return
-        now = time.time()
-        s = drive_state(vid)
-        with LOCK:
-            old, old_time, old_partial = s["cur"], s["cur_time"], s["cur_partial"]
-            if old is not None:
-                s["prev"], s["prev_time"], s["prev_partial"] = old, old_time, old_partial
-            s["cur"], s["cur_time"], s["cur_partial"] = tree, now, False
-            s["changes"] = None
         st.current = "Saving…"
-        if old is not None:
-            try:
-                os.replace(cache_path(vid, "latest"), cache_path(vid, "prev"))
-            except OSError:
-                save_tree(vid, "prev", old, old_time, old_partial)
-        save_tree(vid, "latest", tree, now)
+        now = new_ts(vid)
+        with LOCK:
+            s = drive_state(vid)
+            s["trees"][now] = (tree, False)   # so the state switch below doesn't re-read it from disk
+        save_snapshot(vid, tree, now)
+        prune(vid, load_settings()["keep"])
+        with LOCK:
+            s["base_pick"] = None              # compare the new scan with the one before it
+            drive_state(vid)
     except Exception as ex:  # noqa: BLE001
         st.error = str(ex)
     finally:
         st.running = False
+
+
+def headless_scan(ids=None):
+    """Scan the given volumes (default: the ones chosen in Settings), save, prune, report, notify."""
+    migrate_v1()
+    settings = load_settings()
+    vols = {v["id"]: v for v in volumes()}
+    ids = ids or settings["schedule"]["volumes"] or [next(iter(vols))] if vols else []
+    lock = os.path.join(DATA_DIR, "scan.lock")
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        if time.time() - os.path.getmtime(lock) < 6 * 3600:
+            return 0          # another scheduled scan is still running
+        os.remove(lock)
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    try:
+        for vid in ids:
+            v = vols.get(vid)
+            if v is None:
+                continue
+            t0 = time.time()
+            st = Scan(vid, 0)
+            tree = scan_volume(v, st)
+            now = new_ts(vid)
+            before = list_snaps(vid)
+            save_snapshot(vid, tree, now)
+            prune(vid, settings["keep"])
+            entry = {"vol": vid, "name": v["name"], "time": now, "total": tree.size, "files": tree.nfiles,
+                     "errors": st.errors, "secs": round(time.time() - t0), "auto": True}
+            if before:
+                prev, meta = load_snapshot(vid, before[0])
+                if prev is not None:
+                    ch = all_changes({"cur": tree, "prev": prev, "prev_partial": bool(meta.get("partial")),
+                                      "changes": None})
+                    entry.update(since=before[0], delta=tree.size - prev.size,
+                                 top=[{"p": list(pp), "d": d} for d, pp, *_ in ch[:5]])
+            append_report(entry)
+            limit = float(settings.get("notifyGB") or 0) * (1 << 30)
+            if limit and entry.get("delta", 0) >= limit:
+                top = entry.get("top") or []
+                body = f"Biggest change: {top[0]['p'][-1]} +{human(top[0]['d'])}" if top else "Open Hoard to see what grew."
+                plat.notify(f"{v['name']} grew {human(entry['delta'])} since the last scan", body)
+    finally:
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+    return 0
 
 
 # ---------------------------------------------------------------- views
@@ -523,11 +699,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_drives(self, b):
         return {"drives": volumes(), "os": plat.NAME, "sep": os.sep,
-                "trashName": plat.TRASH_NAME, "revealName": plat.REVEAL_NAME}
+                "trashName": plat.TRASH_NAME, "revealName": plat.REVEAL_NAME,
+                "theme": load_settings()["theme"]}
 
     def api_open_drive(self, b):
         s = drive_state(b["drive"])
-        return {"time": s["cur_time"], "prevTime": s["prev_time"], "partial": s["cur_partial"],
+        return {"time": s["cur_ts"], "prevTime": s["prev_ts"], "partial": s["cur_partial"],
                 "has": s["cur"] is not None}
 
     def api_scan(self, b):
@@ -536,7 +713,6 @@ class Handler(BaseHTTPRequestHandler):
         if j and j.running:
             return {"error": "A scan is already running."}
         v = vol(vid)
-        drive_state(vid)  # make sure the previous scan is loaded so it becomes "prev"
         try:
             u = shutil.disk_usage(v["root"])
             used = u.total - u.free
@@ -572,7 +748,8 @@ class Handler(BaseHTTPRequestHandler):
             pn = walk_prev(s, parts)
             v = view_json(node, pn, s["prev_partial"], int(b.get("depth", 8)), max(1, node.size * 0.0004))
             v["cats"] = list(node.cats)
-        return {"view": v, "path": parts, "time": s["cur_time"], "prevTime": s["prev_time"]}
+        return {"view": v, "path": parts, "time": s["cur_ts"], "prevTime": s["prev_ts"],
+                "partial": s["cur_partial"]}
 
     def api_files(self, b):
         s = drive_state(b["drive"])
@@ -594,7 +771,24 @@ class Handler(BaseHTTPRequestHandler):
         k = len(parts)
         items = [{"p": list(pp), "d": d, "k": kind, "s": sz, "c": c}
                  for d, pp, kind, sz, c in ch if pp[:k] == parts and len(pp) > k][:100]
-        return {"items": items, "prevTime": s["prev_time"]}
+        return {"items": items, "prevTime": s["prev_ts"]}
+
+    def api_history(self, b):
+        vid = b["drive"]
+        out = []
+        for ts in list_snaps(vid):
+            m = snap_meta(vid, ts) or {}
+            out.append({"ts": ts, "total": m.get("total"), "files": m.get("files"), "partial": m.get("partial", False)})
+        s = drive_state(vid)
+        return {"items": out, "cur": s["cur_ts"], "base": s["prev_ts"]}
+
+    def api_set_baseline(self, b):
+        vid = b["drive"]
+        with LOCK:
+            s = drive_state(vid)
+            s["base_pick"] = int(b["ts"]) if b.get("ts") else None
+            s = drive_state(vid)
+        return {"prevTime": s["prev_ts"]}
 
     def api_reveal(self, b):
         p = full_path(b["drive"], b.get("path") or [])
@@ -617,9 +811,39 @@ class Handler(BaseHTTPRequestHandler):
         s = drive_state(vid)
         with LOCK:
             remove_from_tree(s, parts)
-            tree, when, partial = s["cur"], s["cur_time"], s["cur_partial"]
-        threading.Thread(target=save_tree, args=(vid, "latest", tree, when, partial), daemon=True).start()
+            tree, when, partial = s["cur"], s["cur_ts"], s["cur_partial"]
+        threading.Thread(target=save_snapshot, args=(vid, tree, when, partial), daemon=True).start()
         return {"ok": True}
+
+    def api_settings(self, b):
+        return {"settings": load_settings(), "schedule": plat.schedule_status(),
+                "scheduleNote": plat.SCHEDULE_NOTE, "storage": storage_bytes(),
+                "report": read_report()[-12:][::-1]}
+
+    def api_save_settings(self, b):
+        cur = load_settings()
+        new = b.get("settings") or {}
+        sch = new.get("schedule") or {}
+        t = str(sch.get("time", cur["schedule"]["time"]))
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+            return {"error": "Pick a time like 07:00."}
+        cur["schedule"] = {"enabled": bool(sch.get("enabled")), "time": t,
+                           "volumes": [str(x) for x in sch.get("volumes", [])][:26]}
+        cur["keep"] = max(2, min(365, int(new.get("keep", cur["keep"]))))
+        cur["notifyGB"] = max(0.0, float(new.get("notifyGB", cur["notifyGB"])))
+        cur["theme"] = new.get("theme") if new.get("theme") in ("system", "light", "dark") else cur["theme"]
+        if cur["schedule"]["enabled"] and not cur["schedule"]["volumes"]:
+            return {"error": "Choose at least one disk to scan."}
+        save_settings(cur)
+        err = None
+        h, m = (int(x) for x in t.split(":"))
+        if cur["schedule"]["enabled"]:
+            ok, err = plat.schedule_install(h, m, plat.self_command() + ["--scan"])
+        else:
+            ok, err = plat.schedule_remove()
+        for vid in os.listdir(SCANS_DIR) if os.path.isdir(SCANS_DIR) else []:
+            prune(vid, cur["keep"])
+        return {"ok": ok, "error": err, "settings": cur, "schedule": plat.schedule_status()}
 
 
 def watchdog():
@@ -632,6 +856,7 @@ def watchdog():
 
 
 def main(open_window=True, port=0):
+    migrate_v1()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     if sys.stdout:
@@ -645,6 +870,14 @@ def main(open_window=True, port=0):
     watchdog()                 # browser window: exit once the page says goodbye or goes silent
 
 
+def cli(argv):
+    if "--scan" in argv:
+        i = argv.index("--scan")
+        ids = [a for a in argv[i + 1:] if not a.startswith("--")]
+        sys.exit(headless_scan(ids))
+    main(open_window="--no-window" not in argv,
+         port=int(argv[argv.index("--port") + 1]) if "--port" in argv else 0)
+
+
 if __name__ == "__main__":
-    main(open_window="--no-window" not in sys.argv,
-         port=int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 0)
+    cli(sys.argv)
