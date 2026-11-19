@@ -700,6 +700,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "unknown"})
         try:
             self._send(200, fn(body))
+        except ConnectionError:
+            pass                # the window closed mid-reply; nothing to report
         except Exception as ex:  # noqa: BLE001
             import traceback
             core.log_error(f"api {name}", traceback.format_exc())
