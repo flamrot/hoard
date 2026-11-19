@@ -1,4 +1,4 @@
-﻿# Builds dist\Hoard.exe: a single self-contained Windows executable.
+# Builds dist\Hoard.exe: a single self-contained Windows executable.
 # Usage (from anywhere):  powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')

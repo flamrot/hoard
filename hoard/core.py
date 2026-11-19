@@ -1,7 +1,9 @@
 """Scanning, the in-memory tree, saved snapshots, settings and the scan report log."""
+import contextlib
 import gzip
 import json
 import os
+import threading
 import time
 
 import plat
@@ -260,27 +262,128 @@ def list_snaps(vid):
 
 
 def new_ts(vid):
-    """Timestamp for a new snapshot: now, but always after the newest one (two scans can finish in the same second)."""
+    """Timestamp for a new snapshot: now, but always after the newest one (two scans can finish in the same second).
+    Call it inside vol_lock(), so two processes can't pick the same one."""
     snaps = list_snaps(vid)
     return max(int(time.time()), (snaps[0] + 1) if snaps else 0)
 
 
-def _write_gz(path, write):
-    tmp = path + ".tmp"
-    with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=1) as f:
-        write(f)
-    os.replace(tmp, path)
-
-
-def save_snapshot(vid, tree, when, partial=False):
+@contextlib.contextmanager
+def vol_lock(vid, timeout=180):
+    """One writer at a time per volume, across threads *and* processes (the app and a scheduled scan)."""
     os.makedirs(vol_dir(vid), exist_ok=True)
+    f = open(os.path.join(vol_dir(vid), ".lock"), "a+b")
+    t0 = time.time()
+    try:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() - t0 > timeout:
+                    raise TimeoutError("Another Hoard process is still saving this disk's scan.") from None
+                time.sleep(0.1)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        f.close()
 
-    def w(f):
-        f.write(json.dumps({"v": 3, "time": int(when), "total": tree.size, "files": tree.nfiles,
-                            "partial": partial}) + "\n")
-        json.dump(_enc(tree), f, separators=(",", ":"))
-    _write_gz(snap_path(vid, when), w)
-    save_index(vid, when, tree)
+
+def _write_gz(path, write):
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"     # never shared between two writers
+    try:
+        with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=1) as f:
+            write(f)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _save(vid, tree, when, partial, root, guard):
+    # encode while holding the caller's lock, so a removal can't change the tree half-way through
+    with guard or contextlib.nullcontext():
+        body = json.dumps(_enc(tree), separators=(",", ":"))
+        idx = build_index(tree)
+        meta = {"v": 3, "time": int(when), "total": tree.size, "files": tree.nfiles, "partial": partial, "root": root}
+    _write_gz(snap_path(vid, when), lambda f: (f.write(json.dumps(meta) + "\n"), f.write(body)))
+    _write_gz(idx_path(vid, when), lambda f: json.dump(idx, f, separators=(",", ":")))
+    _IDX[(vid, int(when))] = idx
+
+
+def save_snapshot(vid, tree, when, partial=False, root=None, guard=None):
+    """(Re)write one snapshot. `root` records which folder it came from; `guard` is held while encoding."""
+    with vol_lock(vid):
+        _save(vid, tree, when, partial, root, guard)
+
+
+def commit_scan(vid, tree, root, keep, partial=False, guard=None):
+    """Save a new scan under a fresh timestamp and prune old ones, all under the volume lock. Returns the timestamp."""
+    with vol_lock(vid):
+        when = new_ts(vid)
+        _save(vid, tree, when, partial, root, guard)
+        prune(vid, keep)
+    return when
+
+
+def migrate_ids(vols):
+    """Older versions built ids from a shortened name, so two places could share one. Move each old scan
+    folder to its owner's new id, but only when the owner is certain; then update settings and lists."""
+    claims = {}
+    for v in vols:
+        old = v.get("legacy")
+        if old and old != v["id"]:
+            claims.setdefault(old, []).append(v)
+    moved = {}
+    for old, owners in claims.items():
+        src = vol_dir(old)
+        if not os.path.isdir(src):
+            continue
+        owner = owners[0] if len(owners) == 1 else None
+        if owner is None:          # several places claim it: only the one the scan says it came from
+            snaps = list_snaps(old)
+            root = (snap_meta(old, snaps[0]) or {}).get("root") if snaps else None
+            owner = next((v for v in owners if root and v["root"] == root), None)
+        if owner is None:
+            log_error("migrate ids", f"{old} could belong to {len(owners)} places; left as it is")
+            continue
+        dst = vol_dir(owner["id"])
+        if os.path.exists(dst):
+            continue
+        try:
+            os.replace(src, dst)
+            moved[old] = owner["id"]
+        except OSError as ex:
+            log_error("migrate ids", f"{old} -> {owner['id']}: {ex}")
+    if not moved:
+        return moved
+    s = load_settings()
+    s["schedule"]["volumes"] = [moved.get(x, x) for x in s["schedule"]["volumes"]]
+    s["ignore"] = {moved.get(k, k): v for k, v in s.get("ignore", {}).items()}
+    for w in s.get("watch", []):
+        w["vol"] = moved.get(w.get("vol"), w.get("vol"))
+    save_settings(s)
+    write_staged([dict(it, vol=moved.get(it["vol"], it["vol"])) for it in read_staged()])
+    _write_json("report.json", [dict(e, vol=moved.get(e.get("vol"), e.get("vol"))) for e in read_report()])
+    for (vid, ts) in list(_IDX):
+        if vid in moved:
+            _IDX.pop((vid, ts), None)
+    return moved
 
 
 def snap_meta(vid, ts):

@@ -98,37 +98,108 @@ def file_size(path):
     return 0
 
 
-def _clear_dir(d, older, stats, keep_root):
+_FD_OK = os.name != "nt" and {os.open, os.unlink, os.rmdir} <= os.supports_dir_fd and os.scandir in os.supports_fd
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _clear_fd(dfd, older, stats):
+    """POSIX: work through open directory handles, so a folder swapped for a link mid-way is never followed:
+    each child is opened relative to its parent with O_NOFOLLOW and must be the same folder we listed."""
     try:
-        entries = list(os.scandir(d))
+        entries = list(os.scandir(dfd))
     except OSError:
         stats["skipped"] += 1
         return
     for e in entries:
         try:
-            if e.is_symlink() or e.is_junction():
-                continue                       # never follow (or delete through) links
-            if e.is_dir(follow_symlinks=False):
-                _clear_dir(e.path, older, stats, keep_root=False)
+            st = e.stat(follow_symlinks=False)
+            if stat.S_ISLNK(st.st_mode):
                 continue
-            s = e.stat(follow_symlinks=False)
-            if older is not None and s.st_mtime >= older:
+            if stat.S_ISDIR(st.st_mode):
+                try:
+                    cfd = os.open(e.name, _DIR_FLAGS, dir_fd=dfd)
+                except OSError:
+                    stats["skipped"] += 1
+                    continue
+                try:
+                    now = os.fstat(cfd)
+                    if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+                        stats["skipped"] += 1       # replaced since we listed it
+                        continue
+                    _clear_fd(cfd, older, stats)
+                finally:
+                    os.close(cfd)
+                try:
+                    os.rmdir(e.name, dir_fd=dfd)    # only succeeds when empty
+                except OSError:
+                    pass
                 continue
-            size = plat.size_of(s)
-            try:
-                os.remove(e.path)
-            except PermissionError:
-                os.chmod(e.path, stat.S_IWRITE)     # read-only files on Windows
-                os.remove(e.path)
-            stats["freed"] += size
+            if older is not None and st.st_mtime >= older:
+                continue
+            os.unlink(e.name, dir_fd=dfd)           # removes the entry itself; never follows anything
+            stats["freed"] += plat.size_of(st)
             stats["files"] += 1
         except OSError:
             stats["skipped"] += 1
+
+
+def _clear_dir(d, older, stats, keep_root, expect=None):
+    """Windows (and any POSIX without dir_fd): hold each folder open, without delete sharing, while clearing it,
+    so neither it nor any folder above it (up to the cache folder) can be renamed or swapped for a junction."""
+    pin = plat.pin_dir(d, expect)
+    if pin is None:
+        stats["skipped"] += 1
+        return
+    try:
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            stats["skipped"] += 1
+            return
+        for e in entries:
+            try:
+                if e.is_symlink() or e.is_junction():
+                    continue                       # never follow (or delete through) links
+                if e.is_dir(follow_symlinks=False):
+                    _clear_dir(e.path, older, stats, keep_root=False, expect=e.inode())
+                    continue
+                s = e.stat(follow_symlinks=False)
+                if plat.is_link(s):
+                    continue
+                if older is not None and s.st_mtime >= older:
+                    continue
+                size = plat.size_of(s)
+                try:
+                    os.remove(e.path)
+                except PermissionError:
+                    os.chmod(e.path, stat.S_IWRITE)     # read-only files on Windows
+                    os.remove(e.path)
+                stats["freed"] += size
+                stats["files"] += 1
+            except OSError:
+                stats["skipped"] += 1
+    finally:
+        plat.unpin_dir(pin)
     if not keep_root:
         try:
             os.rmdir(d)          # only succeeds when empty
         except OSError:
             pass
+
+
+def _clear_tree(d, older, stats):
+    if _FD_OK:
+        try:
+            top = os.open(d, _DIR_FLAGS)
+        except OSError:
+            stats["skipped"] += 1
+            return
+        try:
+            _clear_fd(top, older, stats)
+        finally:
+            os.close(top)
+    else:
+        _clear_dir(d, older, stats, keep_root=True)
 
 
 def clear(paths, older=None):
@@ -147,7 +218,7 @@ def clear(paths, older=None):
             except OSError:
                 stats["skipped"] += 1
         else:
-            _clear_dir(p, older, stats, keep_root=True)
+            _clear_tree(p, older, stats)
     return stats
 
 

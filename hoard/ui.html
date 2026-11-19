@@ -541,7 +541,7 @@ main[hidden], .toolbar[hidden], .tabs button[hidden] { display: none; }
 .simpletoggle input:checked + .sw { background: var(--accent); }
 .simpletoggle input:checked + .sw::after { transform: translateX(14px); }
 .simpletoggle input:focus-visible + .sw { outline: 2px solid var(--accent); outline-offset: 2px; }
-body.simple .views, body.simple #stageBtn { display: none; }
+body.simple .views { display: none; }
 .simple-wrap { max-width: 860px; margin: 0 auto; padding: 28px 24px 60px; display: grid; gap: 16px; }
 .scard { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 22px 24px; }
 .scard h3 { margin: 0 0 4px; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
@@ -1480,13 +1480,13 @@ function confirmRecycle(path, n) {
   if (S.scanning) return toast("Wait for the scan to finish before removing things.", "error");
   const d = $("#dlg");
   d.className = "";
-  const bin = binName();
-  d.innerHTML = `<h3>Move “${esc(n.n)}” to the ${esc(bin)}?</h3>
+  const bin = binName(), binH = esc(bin);     // a cloud's bin name includes its remote name: always escape it
+  d.innerHTML = `<h3>Move “${esc(n.n)}” to the ${binH}?</h3>
     <div class="dpath">${esc(fullPath(path))}</div>
-    <p>${n.k === "d" ? `This folder and everything in it (${fmt(n.s)}${n.f ? `, ${n.f.toLocaleString()} files` : ""})` : `This ${fmt(n.s)} file`} will go to the ${bin}, where you can restore it.</p>
-    <p>${isCloudVol() ? `It stays recoverable in the ${esc(bin)} until that's emptied; only then does it stop counting against your storage.`
-      : `The space is freed once you empty the ${bin}.${S.os === "windows" ? " If something is too large for the bin, Windows asks before deleting it permanently." : ""}`}</p>
-    <div class="row-actions"><button class="btn" value="cancel" autofocus>Cancel</button><button class="btn danger solid" value="ok">${ICON.trash}Move to ${bin}</button></div>`;
+    <p>${n.k === "d" ? `This folder and everything in it (${fmt(n.s)}${n.f ? `, ${n.f.toLocaleString()} files` : ""})` : `This ${fmt(n.s)} file`} will go to the ${binH}, where you can restore it.</p>
+    <p>${isCloudVol() ? `It stays recoverable in the ${binH} until that's emptied; only then does it stop counting against your storage.`
+      : `The space is freed once you empty the ${binH}.${S.os === "windows" ? " If something is too large for the bin, Windows asks before deleting it permanently." : ""}`}</p>
+    <div class="row-actions"><button class="btn" value="cancel" autofocus>Cancel</button><button class="btn danger solid" value="ok">${ICON.trash}Move to ${binH}</button></div>`;
   d.querySelector('[value="cancel"]').onclick = () => d.close();
   d.querySelector('[value="ok"]').onclick = async e => {
     const b = e.currentTarget; b.disabled = true; b.innerHTML = `<div class="spinner" style="width:14px;height:14px;border-color:rgba(255,255,255,.4);border-top-color:#fff"></div>Moving…`;
@@ -2547,22 +2547,28 @@ async function fillSimpleClean(my) {
     await new Promise(r => setTimeout(r, 700));
   }
   S.cleanup = st;
-  const safe = st.items.filter(i => (i.action === "clear" || i.action === "empty_bin" || i.action === "cloud_empty") && !i.review && i.size > 0);
+  // caches and temp files only: apps rebuild them. The Recycle Bin is your deleted files, so it's its own step.
+  const safe = st.items.filter(i => i.action === "clear" && !i.review && i.size > 0);
+  const bin = st.items.find(i => i.action === "empty_bin" && i.size > 0);
   const total = safe.reduce((a, i) => a + i.size, 0);
   const el = $("#sClean");
   if (!el) return;
-  el.innerHTML = `<h3>Free up space safely</h3>${total ? `<p class="sub">Temporary files, caches and the ${esc(S.trashName)}: all rebuilt or no longer needed.</p>
+  el.innerHTML = `<h3>Free up space safely</h3>${total ? `<p class="sub">Temporary files and caches: apps rebuild them when they need them.</p>
       ${safe.map(i => `<div class="srow"><span class="n">${esc(i.title)}</span><span class="p">${esc(i.desc)}</span><span class="s">${fmt(i.size)}</span><span class="a"></span></div>`).join("")}
       <div style="margin-top:14px"><button class="btn primary bigbtn" id="sCleanGo">Free up ${fmt(total)}</button></div>`
-    : `<p class="sub">Nothing to clear right now. Your caches and temporary files are already small.</p>`}`;
+    : `<p class="sub">Nothing to clear right now. Your caches and temporary files are already small.</p>`}
+    ${bin ? `<div class="srow binrow"><span class="n">${esc(S.trashName)}</span><span class="p">Files you deleted earlier. Emptying it removes them for good; check it first if you're not sure.</span>
+      <span class="s">${fmt(bin.size)}</span><span class="a"><button class="btn" id="sBin">Empty…</button></span></div>` : ""}`;
   const go = $("#sCleanGo");
   if (go) go.onclick = () => simpleCleanup(safe);
+  const sb = $("#sBin");
+  if (sb) sb.onclick = async () => { await emptyBin(); S.cleanup = null; renderSimple(); };
 }
 async function simpleCleanup(items) {
   const d = $("#dlg"); d.className = "";
-  d.innerHTML = `<h3>Free up space?</h3><p>Untick anything you'd rather keep. These are deleted for good, but they're temporary files and caches that apps rebuild when needed.</p>
+  d.innerHTML = `<h3>Free up space?</h3><p>These are temporary files and caches. Apps rebuild them when they need them, so nothing of yours is lost. Untick anything you'd rather keep.</p>
     ${items.map((i, k) => `<label class="cand" style="grid-template-columns:22px minmax(0,1fr) auto"><input type="checkbox" data-k="${k}" checked><span class="cp">${esc(i.title)}</span><span class="cz">${fmt(i.size)}</span></label>`).join("")}
-    <div class="row-actions"><button class="btn" id="scNo">Cancel</button><button class="btn danger solid" id="scYes">Free up space</button></div>`;
+    <div class="row-actions"><button class="btn" id="scNo">Cancel</button><button class="btn primary" id="scYes">Free up space</button></div>`;
   $("#scNo").onclick = () => d.close();
   $("#scYes").onclick = async () => {
     const pick = [...d.querySelectorAll("[data-k]")].filter(x => x.checked).map(x => items[+x.dataset.k]);
@@ -2585,18 +2591,19 @@ async function simpleCleanup(items) {
 }
 async function fillSimpleOld(my) {
   let r;
-  try { r = await api("search", { drive: S.drive, path: [], kind: "file", olderDays: 365, minSize: 500 * MB }); } catch { return; }
+  // only your own files: never system or program folders, app data, game libraries or the Recycle Bin
+  try { r = await api("search", { drive: S.drive, path: [], kind: "file", olderDays: 365, minSize: 500 * MB, personal: true }); } catch { return; }
   const el = $("#sOld");
   if (my !== simpleTok || !el) return;
   const items = r.items.slice(0, 6);
-  el.innerHTML = `<h3>Big files you haven't touched in a year</h3>${items.length ? `<p class="sub">Old downloads, videos and disk images are the usual suspects. Removing sends them to the ${esc(S.trashName)}.</p>
+  el.innerHTML = `<h3>Big files you haven't touched in a year</h3>${items.length ? `<p class="sub">Your own files only: old downloads, videos and disk images are the usual suspects. Marking one puts it on the removal list; nothing is deleted until you review it there.</p>
     ${items.map((it, k) => `<div class="srow"><span class="n">${esc(it.p[it.p.length - 1])}</span><span class="p">${esc(fullPath(it.p.slice(0, -1)))} · last changed ${dateStr(it.a)}</span>
-      <span class="s">${fmt(it.s)}</span><span class="a"><button class="btn" data-oshow="${k}">Show</button>${canDelete(it.p) ? `<button class="btn danger" data-odel="${k}">Remove</button>` : ""}</span></div>`).join("")}`
-    : `<p class="sub">None. Every big file here has been used in the last year${r.items ? "" : ", or this scan has no file dates (check the drive again)"}.</p>`}`;
+      <span class="s">${fmt(it.s)}</span><span class="a"><button class="btn" data-oshow="${k}">Show</button>${canDelete(it.p) ? `<button class="btn" data-omark="${k}">Mark for removal</button>` : ""}</span></div>`).join("")}`
+    : `<p class="sub">None. Every big file of yours here has been used in the last year${r.items ? "" : ", or this scan has no file dates (check the drive again)"}.</p>`}`;
   el.querySelectorAll("[data-oshow]").forEach(b => b.onclick = () => { const it = items[+b.dataset.oshow]; showOnMap(it.p, { s: it.s, k: "f", c: it.c, a: it.a }); });
-  el.querySelectorAll("[data-odel]").forEach(b => b.onclick = () => {
-    const it = items[+b.dataset.odel];
-    confirmRecycle(it.p, { n: it.p[it.p.length - 1], s: it.s, k: "f", c: it.c });
+  el.querySelectorAll("[data-omark]").forEach(b => b.onclick = () => {
+    const it = items[+b.dataset.omark];
+    stage([{ path: it.p, name: it.p[it.p.length - 1], size: it.s, kind: "f", c: it.c }]);
   });
 }
 async function fillSimpleGrew(my) {

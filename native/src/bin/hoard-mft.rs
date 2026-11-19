@@ -50,6 +50,36 @@ fn fixup(rec: &mut [u8], sector: usize) -> bool {
     true
 }
 
+/// Volume geometry from the NTFS boot sector: (bytes per sector, bytes per cluster, bytes per MFT record,
+/// byte offset of the MFT). Every value is checked, so a damaged or hostile boot sector gives an error
+/// instead of a panic, a huge allocation or a read loop that never advances.
+fn geometry(boot: &[u8]) -> Result<(u64, u64, u64, u64), String> {
+    if boot.len() < 512 || &boot[3..11] != b"NTFS    " { return Err("not an NTFS volume".into()); }
+    let sector = u16le(boot, 0x0B) as u64;
+    if ![512, 1024, 2048, 4096].contains(&sector) { return Err(format!("unexpected sector size {sector}")); }
+    let spc = match boot[0x0D] {                      // > 0x80 encodes big clusters as 2^(256 - n)
+        0 => return Err("zero sectors per cluster".into()),
+        n if n <= 0x80 => n as u64,
+        n => { let s = 256 - n as u32; if s > 12 { return Err("cluster size out of range".into()); } 1u64 << s }
+    };
+    if !spc.is_power_of_two() { return Err("sectors per cluster isn't a power of two".into()); }
+    let cluster = sector * spc;
+    if cluster > 2 << 20 { return Err("cluster size out of range".into()); }
+    let cpr = boot[0x40] as i8;
+    let rec_size = if cpr > 0 {
+        (cpr as u64).checked_mul(cluster).ok_or("record size overflow")?
+    } else {
+        let s = -(cpr as i32);
+        if !(9..=16).contains(&s) { return Err("record size out of range".into()); }
+        1u64 << s
+    };
+    if !(256..=65536).contains(&rec_size) || !rec_size.is_power_of_two() {
+        return Err(format!("unexpected MFT record size {rec_size}"));
+    }
+    let mft_at = u64le(boot, 0x30).checked_mul(cluster).ok_or("MFT position overflow")?;
+    Ok((sector, cluster, rec_size, mft_at))
+}
+
 /// Decode a non-resident attribute's data runs into (starting cluster, cluster count) pairs.
 /// Never reads past the attribute or the record, so a damaged entry can't crash the scan.
 fn data_runs(rec: &[u8], attr: usize) -> Vec<(i64, u64)> {
@@ -188,16 +218,11 @@ fn run() -> Result<(), String> {
         .open(format!("\\\\.\\{}:", letter)).map_err(|e| format!("open volume: {e}"))?;
     let mut boot = [0u8; 512];
     vol.read_exact(&mut boot).map_err(|e| format!("read boot sector: {e}"))?;
-    if &boot[3..11] != b"NTFS    " { return Err("not an NTFS volume".into()); }
-    let sector = u16le(&boot, 0x0B) as u64;
-    let cluster = sector * boot[0x0D] as u64;
-    let mft_lcn = u64le(&boot, 0x30);
-    let cpr = boot[0x40] as i8;
-    let rec_size: u64 = if cpr > 0 { cpr as u64 * cluster } else { 1u64 << (-(cpr as i32)) };
+    let (sector, cluster, rec_size, mft_at) = geometry(&boot)?;
 
     // record 0 describes the $MFT itself: where it lives on disk and how big it is
     let mut rec0 = vec![0u8; rec_size as usize];
-    vol.seek(SeekFrom::Start(mft_lcn * cluster)).map_err(|e| e.to_string())?;
+    vol.seek(SeekFrom::Start(mft_at)).map_err(|e| e.to_string())?;
     vol.read_exact(&mut rec0).map_err(|e| format!("read $MFT: {e}"))?;
     if !fixup(&mut rec0, sector as usize) { return Err("bad $MFT record".into()); }
     let (mut runs, mut mft_size) = (Vec::new(), 0u64);
@@ -215,7 +240,14 @@ fn run() -> Result<(), String> {
         off += len;
     }
     if runs.is_empty() { return Err("couldn't find the $MFT data".into()); }
-    let n = (mft_size / rec_size) as usize;
+    let n = mft_size / rec_size;
+    if n == 0 || n > 1 << 31 { return Err(format!("the file table looks wrong ({n} records)")); }
+    for &(lcn, clusters) in &runs {               // positions must fit before any arithmetic on them
+        if clusters.checked_mul(cluster).is_none() || (lcn.max(0) as u64).checked_mul(cluster).is_none() {
+            return Err("the file table's location looks wrong".into());
+        }
+    }
+    let n = n as usize;
     let mut r = Records {
         parent: vec![NONE; n], flags: vec![0; n], name_ns: vec![0; n], size: vec![0; n],
         mtime: vec![0; n], name: vec![Box::from(""); n],
@@ -405,6 +437,44 @@ mod tests {
     fn records(n: usize) -> Records {
         Records { parent: vec![NONE; n], flags: vec![0; n], name_ns: vec![0; n], size: vec![0; n],
                   mtime: vec![0; n], name: vec![Box::from(""); n] }
+    }
+
+    fn boot(sector: u16, spc: u8, cpr: i8, mft_lcn: u64) -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        b[3..11].copy_from_slice(b"NTFS    ");
+        b[0x0B..0x0D].copy_from_slice(&sector.to_le_bytes());
+        b[0x0D] = spc;
+        b[0x30..0x38].copy_from_slice(&mft_lcn.to_le_bytes());
+        b[0x40] = cpr as u8;
+        b
+    }
+
+    #[test]
+    fn geometry_reads_normal_volumes() {
+        // the common layout: 512-byte sectors, 4 KB clusters, 1 KB records (encoded as -10)
+        assert_eq!(geometry(&boot(512, 8, -10, 786432)).unwrap(), (512, 4096, 1024, 786432 * 4096));
+        // 4Kn drive with 4 KB records, and big clusters encoded as 2^(256 - n)
+        assert_eq!(geometry(&boot(4096, 1, -12, 2)).unwrap().2, 4096);
+        assert_eq!(geometry(&boot(512, 0xF4, -10, 1)).unwrap().1, 512 << 12);
+        // positive clusters-per-record
+        assert_eq!(geometry(&boot(512, 2, 1, 1)).unwrap().2, 1024);
+    }
+
+    #[test]
+    fn geometry_rejects_damaged_boot_sectors() {
+        assert!(geometry(&boot(0, 8, -10, 1)).is_err());              // no sector size
+        assert!(geometry(&boot(513, 8, -10, 1)).is_err());            // odd sector size
+        assert!(geometry(&boot(512, 0, -10, 1)).is_err());            // zero sectors per cluster
+        assert!(geometry(&boot(512, 3, -10, 1)).is_err());            // not a power of two
+        assert!(geometry(&boot(512, 0x81, -10, 1)).is_err());         // absurd cluster size
+        assert!(geometry(&boot(512, 8, -100, 1)).is_err());           // shift that would panic
+        assert!(geometry(&boot(512, 8, -30, 1)).is_err());            // 1 GB records (zero-sized read chunks)
+        assert!(geometry(&boot(512, 128, 127, 1)).is_err());          // records larger than 64 KB
+        assert!(geometry(&boot(512, 8, -10, u64::MAX)).is_err());     // MFT position overflows
+        let mut not_ntfs = boot(512, 8, -10, 1);
+        not_ntfs[3] = b'X';
+        assert!(geometry(&not_ntfs).is_err());
+        assert!(geometry(&[0u8; 100]).is_err());                       // short buffer
     }
 
     #[test]

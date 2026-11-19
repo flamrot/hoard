@@ -80,13 +80,16 @@ def reveal(path):
 
 
 def protected(root, parts, full):
+    if not parts:
+        return "That's the whole drive." if len(root.rstrip("\\/")) <= 2 else "That's the whole folder Hoard is mapping."
     sysdrive = (os.environ.get("SystemDrive") or "C:").upper()
-    on_system = root.upper().startswith(sysdrive)
-    if len(parts) < (2 if on_system else 1):
-        return "Top-level folders and files of the Windows drive can't be removed from here." if on_system \
-            else "That's the whole drive."
-    if parts[0].lower() in ("$recycle.bin", "system volume information", "recovery", "boot",
-                            "$windows.~bt", "$windows.~ws", "$winreagent", "config.msi"):
+    # judge by the position on the *drive*, not inside the volume: an added folder on C: is not C:'s top level
+    drive, rest = os.path.splitdrive(os.path.normpath(full))
+    dparts = [p for p in rest.split("\\") if p]
+    if drive.upper() == sysdrive and len(dparts) < 2:
+        return "Top-level folders and files of the Windows drive can't be removed from here."
+    if dparts and dparts[0].lower() in ("$recycle.bin", "system volume information", "recovery", "boot",
+                                        "$windows.~bt", "$windows.~ws", "$winreagent", "config.msi"):
         return "That's a Windows system folder; it can't be removed from here."
     full = os.path.normpath(full).lower()
     win = (os.environ.get("SystemRoot") or "C:\\Windows").lower()
@@ -147,6 +150,49 @@ def is_admin():
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:  # noqa: BLE001
         return False
+
+
+class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+    _fields_ = [("dwFileAttributes", wintypes.DWORD), ("ftCreationTime", wintypes.FILETIME),
+                ("ftLastAccessTime", wintypes.FILETIME), ("ftLastWriteTime", wintypes.FILETIME),
+                ("dwVolumeSerialNumber", wintypes.DWORD), ("nFileSizeHigh", wintypes.DWORD),
+                ("nFileSizeLow", wintypes.DWORD), ("nNumberOfLinks", wintypes.DWORD),
+                ("nFileIndexHigh", wintypes.DWORD), ("nFileIndexLow", wintypes.DWORD)]
+
+
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_k32.CreateFileW.restype = wintypes.HANDLE
+_k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                             wintypes.DWORD, wintypes.HANDLE]
+_k32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION)]
+_k32.CloseHandle.argtypes = [wintypes.HANDLE]
+_INVALID = wintypes.HANDLE(-1).value
+
+
+def pin_dir(path, expect=None):
+    """Open the folder itself (never what a junction points to) and keep the handle: without delete sharing,
+    nobody can rename, delete or swap it for a junction until unpin_dir(). Checks it's a real folder and,
+    with `expect`, that it's the same one we listed (by file id)."""
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES = 0x1, 0x80
+    SHARE_READ_WRITE = 0x1 | 0x2                      # deliberately no FILE_SHARE_DELETE
+    OPEN_EXISTING = 3
+    BACKUP_SEMANTICS, OPEN_REPARSE_POINT = 0x02000000, 0x00200000
+    h = _k32.CreateFileW(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, SHARE_READ_WRITE, None, OPEN_EXISTING,
+                         BACKUP_SEMANTICS | OPEN_REPARSE_POINT, None)
+    if h is None or h == _INVALID:
+        return None
+    info = _BY_HANDLE_FILE_INFORMATION()
+    ok = _k32.GetFileInformationByHandle(h, ctypes.byref(info))
+    attrs = info.dwFileAttributes
+    idx = (info.nFileIndexHigh << 32) | info.nFileIndexLow
+    if not ok or not attrs & 0x10 or attrs & 0x400 or (expect and idx != expect & 0xFFFFFFFFFFFFFFFF):
+        _k32.CloseHandle(h)
+        return None
+    return h
+
+
+def unpin_dir(h):
+    _k32.CloseHandle(h)
 
 
 def schedule_install(hour, minute, argv, elevated=False):

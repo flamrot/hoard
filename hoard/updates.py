@@ -45,15 +45,18 @@ def _trusted(url):
 
 
 def _pick_asset(assets):
+    """The app itself, by its exact release name: never a helper (hoard-mft.exe), checksum or other file."""
+    import re
     names = [(a.get("name", ""), a.get("browser_download_url")) for a in assets]
     if plat.NAME == "windows":
-        want = [n for n in names if n[0].lower().endswith(".exe")]
+        want = [n for n in names if n[0] == "Hoard.exe"]
     elif plat.NAME == "macos":
         import platform
         arch = "arm64" if platform.machine() == "arm64" else "x86_64"
-        want = [n for n in names if n[0].endswith(".dmg") and arch in n[0]] or [n for n in names if n[0].endswith(".dmg")]
+        want = [n for n in names if re.fullmatch(rf"Hoard-[\w.]+-macos-{arch}\.dmg", n[0])]
     else:
-        want = [n for n in names if n[0].endswith(".AppImage")] or [n for n in names if n[0].endswith(".deb")]
+        want = ([n for n in names if re.fullmatch(r"Hoard-[\w.]+-x86_64\.AppImage", n[0])]
+                or [n for n in names if re.fullmatch(r"hoard_[\w.]+_amd64\.deb", n[0])])
     return want[0] if want else (None, None)
 
 
@@ -96,7 +99,8 @@ def apply():
         webbrowser.open(c.get("asset") or c.get("page"))
         return {"ok": True, "opened": True}
     exe = sys.executable
-    new = exe + ".new"
+    new, old = exe + ".new", exe + ".old"
+    moved = False
     import hashlib
     try:
         # only from GitHub over HTTPS, and only if it matches the checksum published with the release
@@ -118,12 +122,17 @@ def apply():
                 f.write(b)
         if h.hexdigest() != want:
             raise OSError("the download doesn't match the release's checksum")
-        old = exe + ".old"
         if os.path.exists(old):
             os.remove(old)
         os.replace(exe, old)          # Windows lets a running exe be renamed, not overwritten
+        moved = True
         os.replace(new, exe)
     except OSError as ex:
+        if moved and not os.path.exists(exe):
+            try:
+                os.replace(old, exe)  # put the working version back, so Hoard still starts next time
+            except OSError as ex2:
+                core.log_error("update rollback", str(ex2))
         try:
             os.remove(new)
         except OSError:

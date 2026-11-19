@@ -186,19 +186,227 @@ class Changes(unittest.TestCase):
         self.assertTrue(any(c["k"] == "o" for c in v["ch"]))       # "tiny" folded into "smaller items"
 
 
+def add_vol(path, legacy=None):
+    """Register a folder as a volume, the way an added location is (without touching real settings)."""
+    os.makedirs(path, exist_ok=True)
+    v = server.location_volume(path)
+    if legacy is not None:
+        v["legacy"] = legacy
+    server.VOLS[v["id"]] = v
+    server.STATE.pop(v["id"], None)
+    return v
+
+
 class Staging(unittest.TestCase):
     def setUp(self):
         core.write_staged([])
+        self.root = tempfile.mkdtemp(dir=TMP)
+        self.v = add_vol(self.root)
+        write(os.path.join(self.root, "a", "b", "c.txt"), 10)
+        write(os.path.join(self.root, "a", "z"), 10)
 
     def test_parent_replaces_children_and_children_are_skipped(self):
-        server.staged_add([{"vol": "X", "path": ["a", "b", "c.txt"], "size": 1}])
-        server.staged_add([{"vol": "X", "path": ["a"], "size": 5}])
+        vid = self.v["id"]
+        server.staged_add([{"vol": vid, "path": ["a", "b", "c.txt"], "size": 1}])
+        server.staged_add([{"vol": vid, "path": ["a"], "size": 5}])
         self.assertEqual([i["path"] for i in core.read_staged()], [["a"]])
-        self.assertEqual(server.staged_add([{"vol": "X", "path": ["a", "z"], "size": 1}]), 0)
+        self.assertEqual(server.staged_add([{"vol": vid, "path": ["a", "z"], "size": 1}]), 0)
 
     def test_bad_paths_never_staged(self):
-        self.assertEqual(server.staged_add([{"vol": "X", "path": ["..", "Windows"], "size": 1}]), 0)
+        self.assertEqual(server.staged_add([{"vol": self.v["id"], "path": ["..", "Windows"], "size": 1}]), 0)
         self.assertEqual(core.read_staged(), [])
+
+    def test_missing_items_and_unknown_volumes_never_staged(self):
+        self.assertEqual(server.staged_add([{"vol": self.v["id"], "path": ["nope.txt"], "size": 1}]), 0)
+        self.assertEqual(server.staged_add([{"vol": "no-such-volume", "path": ["a"], "size": 1}]), 0)
+
+
+def make_junction(link, target):
+    """A directory link: a junction on Windows (no admin needed), a symlink elsewhere."""
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(target, link)
+    else:
+        os.symlink(target, link)
+
+
+class Safety(unittest.TestCase):
+    """The review findings about deleting the wrong thing."""
+
+    def setUp(self):
+        core.write_staged([])
+        self.root = tempfile.mkdtemp(dir=TMP)
+        self.v = add_vol(self.root)
+
+    def test_volume_ids_never_collide(self):
+        a, b = os.path.normcase(r"D:\archive one"), os.path.normcase(r"D:\archive-one")
+        self.assertEqual(plat.legacy_vol_id("dir", a), plat.legacy_vol_id("dir", b))    # the old bug
+        self.assertNotEqual(plat.vol_id("dir", a), plat.vol_id("dir", b))
+        self.assertNotEqual(plat.vol_id("cloud", "team drive"), plat.vol_id("cloud", "team-drive"))
+        long = "x" * 80
+        self.assertNotEqual(plat.vol_id("dir", long + "1"), plat.vol_id("dir", long + "2"))
+
+    def test_migration_moves_scans_only_to_their_real_owner(self):
+        one, two = os.path.join(TMP, "mig", "archive one"), os.path.join(TMP, "mig", "archive-one")
+        legacy = "dir-legacy-shared"
+        va, vb = add_vol(one, legacy), add_vol(two, legacy)
+        core.save_snapshot(legacy, tree({"photos": {"a.jpg": 5}}), 1000, root=one)
+        s = core.load_settings()
+        s["schedule"]["volumes"] = [legacy]
+        core.save_settings(s)
+        moved = core.migrate_ids([va, vb])
+        self.assertEqual(moved, {legacy: va["id"]})                 # the scan says it came from "archive one"
+        self.assertEqual(core.list_snaps(va["id"]), [1000])
+        self.assertEqual(core.list_snaps(vb["id"]), [])
+        self.assertEqual(core.load_settings()["schedule"]["volumes"], [va["id"]])
+        # two claimants and no recorded root: nobody gets it
+        core.save_snapshot("dir-legacy-2", tree({"x.bin": 5}), 1000)
+        vc, vd = add_vol(os.path.join(TMP, "mig", "c"), "dir-legacy-2"), add_vol(os.path.join(TMP, "mig", "d"), "dir-legacy-2")
+        self.assertEqual(core.migrate_ids([vc, vd]), {})
+        self.assertEqual(core.list_snaps("dir-legacy-2"), [1000])
+
+    def test_removal_refused_when_the_scan_is_of_another_folder(self):
+        write(os.path.join(self.root, "photos", "a.jpg"), 10)
+        core.save_snapshot(self.v["id"], tree({"photos": {"a.jpg": 10}}), 1000, root=os.path.join(TMP, "elsewhere"))
+        server.STATE.pop(self.v["id"], None)
+        ok, err = server.trash_any(self.v["id"], ["photos", "a.jpg"])
+        self.assertFalse(ok)
+        self.assertIn("different folder", err)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "photos", "a.jpg")))
+
+    def test_old_unverifiable_scans_need_a_rescan_before_removing(self):
+        v = add_vol(tempfile.mkdtemp(dir=TMP), legacy="dir-old")
+        write(os.path.join(v["root"], "a.bin"), 10)
+        core.save_snapshot(v["id"], tree({"a.bin": 10}), 1000)          # no root recorded (older version)
+        ok, err = server.trash_any(v["id"], ["a.bin"])
+        self.assertFalse(ok)
+        self.assertIn("again", err)
+
+    def test_marked_item_replaced_by_something_else_is_left_alone(self):
+        p = os.path.join(self.root, "installer.iso")
+        write(p, 10)
+        self.assertEqual(server.staged_add([{"vol": self.v["id"], "path": ["installer.iso"], "size": 10}]), 1)
+        os.remove(p)
+        os.makedirs(p)                                     # a folder with unrelated data now has that name
+        write(os.path.join(p, "precious.doc"), 10)
+        r = server.staged_trash()
+        self.assertEqual(r["done"], 0)
+        self.assertIn("changed since you marked it", r["failed"][0]["error"])
+        self.assertTrue(os.path.exists(os.path.join(p, "precious.doc")))
+
+    def test_marked_file_replaced_by_another_file_is_left_alone(self):
+        p = os.path.join(self.root, "video.mp4")
+        write(p, 10)
+        server.staged_add([{"vol": self.v["id"], "path": ["video.mp4"], "size": 10}])
+        keep = os.path.join(self.root, "keep.tmp")
+        write(keep, 10)                                    # hold the old file id so it can't be reused
+        os.remove(p)
+        write(p, 20)
+        r = server.staged_trash()
+        self.assertEqual(r["done"], 0)
+        self.assertTrue(os.path.exists(p))
+
+    def test_never_removes_or_previews_through_a_link(self):
+        outside = tempfile.mkdtemp(dir=TMP)
+        write(os.path.join(outside, "large.bin"), 10)
+        os.makedirs(os.path.join(self.root, "cache"))
+        write(os.path.join(self.root, "cache", "large.bin"), 10)
+        shutil.rmtree(os.path.join(self.root, "cache"))
+        make_junction(os.path.join(self.root, "cache"), outside)       # swapped after the scan
+        self.assertTrue(plat.linked_ancestor(self.root, ["cache", "large.bin"]))
+        ok, err = server.trash_any(self.v["id"], ["cache", "large.bin"])
+        self.assertFalse(ok)
+        self.assertIn("link", err)
+        self.assertTrue(os.path.exists(os.path.join(outside, "large.bin")))
+
+    def test_pinned_folder_cant_be_swapped_and_links_arent_pinned(self):
+        d = os.path.join(self.root, "pinme")
+        os.makedirs(d)
+        link = os.path.join(self.root, "alink")
+        make_junction(link, d)
+        self.assertIsNone(plat.pin_dir(link))
+        self.assertIsNone(plat.pin_dir(d, expect=12345))
+        tok = plat.pin_dir(d)
+        self.assertIsNotNone(tok)
+        try:
+            if sys.platform == "win32":
+                with self.assertRaises(OSError):
+                    os.rename(d, d + "-moved")                # held open: can't be renamed or replaced
+        finally:
+            plat.unpin_dir(tok)
+        os.rename(d, d + "-moved")
+
+    def test_cleanup_still_clears_and_skips_links(self):
+        c = os.path.join(self.root, "Cache")
+        write(os.path.join(c, "sub", "old.tmp"), 10)
+        outside = tempfile.mkdtemp(dir=TMP)
+        write(os.path.join(outside, "keep.txt"), 10)
+        make_junction(os.path.join(c, "link"), outside)
+        st = cleanup.clear([c])
+        self.assertEqual(st["files"], 1)
+        self.assertFalse(os.path.exists(os.path.join(c, "sub")))
+        self.assertTrue(os.path.exists(os.path.join(outside, "keep.txt")))
+
+    def test_simple_mode_only_suggests_your_own_files(self):
+        root = "C:\\" if sys.platform == "win32" else "/"
+        managed = [["$Recycle.Bin", "S-1-5", "$RX.bin"], ["Program Files", "Epic Games", "a.pak"],
+                   ["Users", "me", "AppData", "Local", "Google", "Chrome", "weights.bin"],
+                   ["Games", "steamapps", "common", "x.pak"], ["Users", "me", ".cache", "big.bin"], ["pagefile.sys"]]
+        for parts in managed:
+            self.assertTrue(plat.managed(root, parts), parts)
+        self.assertFalse(plat.managed(root, ["Users", "me", "Videos", "old holiday.mkv"]))
+        self.assertFalse(plat.managed(root, ["Users", "me", "Downloads", "setup.iso"]))
+
+    def test_personal_search_hides_managed_and_placeholder_dates(self):
+        n = core.Node("root")
+        old = time.time() - 400 * 86400
+        for d, f, mt in (("Videos", "old.mkv", old), ("AppData", "weights.bin", old), ("Downloads", "ancient.iso", 315532800)):
+            c = core.Node(d)
+            c.files.append((f, 900 * MB, core.cat_of(f), mt))
+            c.size = 900 * MB
+            n.dirs.append(c)
+            n.size += c.size
+        # a data folder outside any system location (the test's temp folder is inside AppData, which is managed)
+        root = "E:\\Data" if sys.platform == "win32" else "/srv/data"
+        v = dict(server.location_volume(TMP), id="dir-personal-test", root=root)
+        server.VOLS[v["id"]] = v
+        core.save_snapshot(v["id"], n, 2000, root=root)
+        b = {"drive": v["id"], "path": [], "kind": "file", "olderDays": 365, "minSize": 500 * MB}
+        everything = server.Handler.api_search(None, b)["items"]
+        mine = server.Handler.api_search(None, dict(b, personal=True))["items"]
+        self.assertEqual(len(everything), 3)
+        self.assertEqual([i["p"] for i in mine], [["Videos", "old.mkv"]])
+
+    def test_concurrent_saves_get_their_own_timestamps(self):
+        import threading
+        vid = "dir-concurrent"
+        out = []
+        ts = [threading.Thread(target=lambda: out.append(core.commit_scan(vid, tree({"a.bin": 5}), "/x", 30))) for _ in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(len(set(out)), 4)
+        self.assertEqual(sorted(core.list_snaps(vid)), sorted(out))
+        for t in out:
+            tr, meta = core.load_snapshot(vid, t)
+            self.assertEqual(meta["root"], "/x")
+        self.assertFalse([n for n in os.listdir(core.vol_dir(vid)) if n.endswith(".tmp")])
+
+    def test_update_only_installs_the_app_itself(self):
+        assets = [{"name": "hoard-mft.exe", "browser_download_url": "https://github.com/a"},
+                  {"name": "Hoard.exe.sha256", "browser_download_url": "https://github.com/b"},
+                  {"name": "Hoard.exe", "browser_download_url": "https://github.com/c"},
+                  {"name": "Hoard-1.2.0-macos-arm64.dmg", "browser_download_url": "https://github.com/d"},
+                  {"name": "Hoard-1.2.0-macos-x86_64.dmg", "browser_download_url": "https://github.com/e"},
+                  {"name": "Hoard-1.2.0-x86_64.AppImage", "browser_download_url": "https://github.com/f"}]
+        name, _ = updates._pick_asset(assets)
+        want = {"windows": "Hoard.exe", "linux": "Hoard-1.2.0-x86_64.AppImage"}.get(plat.NAME)
+        if want:
+            self.assertEqual(name, want)
+        else:
+            self.assertTrue(name.startswith("Hoard-1.2.0-macos-"))
+        self.assertEqual(updates._pick_asset([{"name": "hoard-mft.exe", "browser_download_url": "x"}]), (None, None))
 
 
 class Duplicates(unittest.TestCase):

@@ -61,10 +61,16 @@ def list_volumes():
         kind = "network" if fs in NETWORK_FS else \
             "removable" if mnt.startswith(("/media/", "/run/media/")) else "fixed"
         name = "/" if mnt == "/" else os.path.basename(mnt) or mnt
-        out.append({"id": "root" if mnt == "/" else "mnt-" + _slug(mnt), "root": mnt, "name": name,
+        out.append({"id": "root" if mnt == "/" else _vol_id("mnt", mnt),
+                    "legacy": None if mnt == "/" else "mnt-" + _slug(mnt), "root": mnt, "name": name,
                     "label": "System" if mnt == "/" else mnt, "type": kind,
                     "total": u.total, "used": u.used, "free": u.free})
     return out
+
+
+def _vol_id(prefix, key):
+    from . import vol_id
+    return vol_id(prefix, key)
 
 
 def _slug(t):

@@ -7,7 +7,7 @@ DATA_DIR = os.path.expanduser("~/Library/Application Support/Hoard")
 TRASH_NAME = "Trash"
 REVEAL_NAME = "Finder"
 
-# On the startup disk, "/" already shows the Data volume through firmlinks (/Users, /Applications, …).
+# On the startup disk, "/" already shows the Data volume through firmlinks (/Users, /Applications, â€¦).
 # Entering /System/Volumes would count everything twice; /Volumes holds the other disks.
 ROOT_EXCLUDES = {"/System/Volumes", "/Volumes", "/dev", "/net", "/home", "/cores"}
 
@@ -50,11 +50,17 @@ def list_volumes():
             continue
         # APFS volumes share their container's space, so "used" is the container's total minus free.
         used = u.total - u.free
-        out.append({"id": "root" if root == "/" else "vol-" + _slug(name), "root": root, "name": name,
+        out.append({"id": "root" if root == "/" else _vol_id("vol", root),
+                    "legacy": None if root == "/" else "vol-" + _slug(name), "root": root, "name": name,
                     "label": "Startup disk" if root == "/" else "External disk",
                     "type": "fixed" if root == "/" else "removable",
                     "total": u.total, "used": used, "free": u.free})
     return out
+
+
+def _vol_id(prefix, key):
+    from . import vol_id
+    return vol_id(prefix, key)
 
 
 def _slug(t):

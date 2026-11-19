@@ -1,4 +1,4 @@
-﻿"""Generate Hoard's Lottie animations (startup, loading, scanning, done) as JSON.
+"""Generate Hoard's Lottie animations (startup, loading, scanning, done) as JSON.
 
     python packaging/make_animations.py      -> hoard/assets/{startup,loading,scanning,done}.json
 

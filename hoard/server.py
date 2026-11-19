@@ -54,7 +54,8 @@ def location_volume(path, name=None):
     except OSError:
         total = free = 0
     net = path.startswith(("\\\\", "//"))
-    return {"id": "dir-" + plat.slug(path), "root": path, "name": name or os.path.basename(path.rstrip("\\/")) or path,
+    return {"id": plat.vol_id("dir", os.path.normcase(path)), "legacy": plat.legacy_vol_id("dir", path),
+            "root": path, "name": name or os.path.basename(path.rstrip("\\/")) or path,
             "label": "Network share" if net else "Folder", "type": "network" if net else "folder",
             "total": total, "used": total - free, "free": free, "location": True}
 
@@ -70,6 +71,15 @@ def volumes():
         if os.path.isdir(loc["path"]):
             vs.append(location_volume(loc["path"], loc.get("name")))
     vs += cloud.volumes()
+    seen, unique = set(), []
+    for v in vs:                       # ids are hashed now, but never let two places share one
+        if v["id"] in seen:
+            core.log_error("volumes", f"two places share the id {v['id']}; ignoring {v['root']}")
+            continue
+        seen.add(v["id"])
+        unique.append(v)
+    vs = unique
+    core.migrate_ids(vs)
     with LOCK:
         VOLS.clear()
         VOLS.update({v["id"]: v for v in vs})
@@ -147,10 +157,30 @@ def fast_scan(v, st):
         return scan_any(v, st)
 
 
-def trash_any(vid, parts):
-    """Move one item to the Recycle Bin / Trash (or the cloud's own trash). Returns (ok, error)."""
+def scan_root_problem(v):
+    """Refuse removals when the saved scan can't be tied to this volume's folder: paths in it might
+    point somewhere else. Drive letters and the startup disk can't be confused, so they're exempt."""
+    s = drive_state(v["id"])
+    if s["cur_ts"] is None:
+        return None
+    root = s.get("cur_root")
+    if root is None:
+        if v.get("legacy"):
+            return (f"Scan {v['name']} again before removing things from it. Its saved scan is from an older "
+                    "version of Hoard, which can't confirm which folder it came from.")
+        return None
+    same = os.path.normcase(root) == os.path.normcase(v["root"]) if v["type"] != "cloud" else root == v["root"]
+    return None if same else f"The saved scan of {v['name']} is of a different folder. Scan it again first."
+
+
+def trash_any(vid, parts, expect=None):
+    """Move one item to the Recycle Bin / Trash (or the cloud's own trash). Returns (ok, error).
+    `expect` is the identity recorded when the item was marked; anything else at that path is left alone."""
     parts = clean_parts(parts)
     v = vol(vid)
+    why = scan_root_problem(v)
+    if why:
+        return False, why
     if v["type"] == "cloud":
         if not parts:
             return False, "That's the whole cloud drive."
@@ -160,8 +190,18 @@ def trash_any(vid, parts):
     why = plat.protected(v["root"], parts, p)
     if why:
         return False, why
+    if plat.linked_ancestor(v["root"], parts):
+        return False, "Part of this path is now a link to somewhere else, so Hoard won't remove through it. Scan again."
     if not os.path.lexists(p):
         return True, "gone"
+    if expect is not None:
+        try:
+            now = plat.identity(p)
+        except OSError:
+            return True, "gone"
+        if (len(expect) == 3 and now != list(expect)) or (len(expect) == 1 and now[2] != expect[0]):
+            return False, ("This changed since you marked it: something else is at that path now. "
+                           "Mark it again if you still want it removed.")
     return plat.trash(p)
 
 
@@ -192,6 +232,7 @@ def drive_state(vid):
         if newest != s["cur_ts"]:
             s["cur_ts"] = newest
             s["cur"], s["cur_partial"] = _tree(s, vid, newest) if newest else (None, False)
+            s["cur_root"] = (core.snap_meta(vid, newest) or {}).get("root") if newest else None
             s["changes"] = None
             s["cache"] = {}
         want = s["base_pick"] if s["base_pick"] in snaps[1:] else (snaps[1] if len(snaps) > 1 else None)
@@ -238,14 +279,12 @@ def run_scan(vid):
         if st.cancel or tree is None:
             return
         st.current = "Saving…"
-        now = core.new_ts(vid)
+        now = core.commit_scan(vid, tree, v["root"], core.load_settings()["keep"], guard=LOCK)
         with LOCK:
-            s = drive_state(vid)
-            s["trees"][now] = (tree, False)   # so the state switch below doesn't re-read it from disk
-        core.save_snapshot(vid, tree, now)
-        core.prune(vid, core.load_settings()["keep"])
-        with LOCK:
-            s["base_pick"] = None              # compare the new scan with the one before it
+            s = STATE.get(vid)
+            if s is not None:
+                s["trees"][now] = (tree, False)   # so the state switch below doesn't re-read it from disk
+                s["base_pick"] = None              # compare the new scan with the one before it
             drive_state(vid)
     except Exception as ex:  # noqa: BLE001
         st.error = str(ex)
@@ -286,10 +325,8 @@ def headless_scan(ids=None):
             except Exception as ex:  # noqa: BLE001 - e.g. a cloud that's offline; keep going with the rest
                 core.log_error(f"scheduled scan of {vid}", str(ex))
                 continue
-            now = core.new_ts(vid)
             before = list_snaps(vid)
-            core.save_snapshot(vid, tree, now)
-            core.prune(vid, settings["keep"])
+            now = core.commit_scan(vid, tree, v["root"], settings["keep"])
             entry = {"vol": vid, "name": v["name"], "time": now, "total": tree.size, "files": tree.nfiles,
                      "errors": st.errors, "secs": round(time.time() - t0), "auto": True}
             prev, ch = None, []
@@ -513,6 +550,16 @@ def age_histogram(node, parts, ign):
     return hist
 
 
+def resave(vid):
+    """Write the current scan back after removals, in the background, under the volume lock."""
+    s = drive_state(vid)
+    if s["cur"] is None:
+        return
+    v = VOLS.get(vid) or {}
+    threading.Thread(target=core.save_snapshot, daemon=True,
+                     args=(vid, s["cur"], s["cur_ts"], s["cur_partial"], s.get("cur_root") or v.get("root"), LOCK)).start()
+
+
 def remove_from_tree(s, parts):
     tree = s["cur"]
     if tree is None:
@@ -579,9 +626,16 @@ def staged_add(items):
             continue
         if any(x["vol"] == vid and x["path"] == parts[:len(x["path"])] for x in cur):
             continue          # already staged, or inside something staged
+        entry = {"vol": vid, "path": parts, "name": it.get("name") or parts[-1], "size": int(it.get("size") or 0),
+                 "kind": it.get("kind") or "f", "c": int(it.get("c") or OTHER)}
+        if not is_cloud(vid):        # remember exactly which file or folder this is, to check before removing
+            try:
+                entry["id"] = plat.identity(full_path(vid, parts))
+                entry["kind"] = "d" if entry["id"][2] else "f"
+            except (OSError, ValueError):
+                continue             # not there (anymore): nothing to mark
         cur = [x for x in cur if not (x["vol"] == vid and x["path"][:len(parts)] == parts)]   # drop children
-        cur.append({"vol": vid, "path": parts, "name": it.get("name") or parts[-1], "size": int(it.get("size") or 0),
-                    "kind": it.get("kind") or "f", "c": int(it.get("c") or OTHER)})
+        cur.append(entry)
         added += 1
     core.write_staged(cur)
     return added
@@ -592,7 +646,8 @@ def staged_trash():
     done, failed, freed, touched = [], [], 0, set()
     for it in items:
         try:
-            ok, err = trash_any(it["vol"], it["path"])
+            expect = it.get("id") or ([it.get("kind") == "d"] if not is_cloud(it["vol"]) else None)
+            ok, err = trash_any(it["vol"], it["path"], expect)
             if not ok:
                 raise ValueError(err)
             if err == "gone":
@@ -608,8 +663,7 @@ def staged_trash():
             failed.append(dict(it, error=str(ex)))
     core.write_staged(failed)
     for vid in touched:
-        s = drive_state(vid)
-        threading.Thread(target=core.save_snapshot, args=(vid, s["cur"], s["cur_ts"], s["cur_partial"]), daemon=True).start()
+        resave(vid)
     return {"done": len(done), "failed": failed, "size": freed}
 
 
@@ -702,7 +756,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if is_cloud(q["v"][0]):
                 raise ValueError("cloud")
-            path = full_path(q["v"][0], json.loads(q["p"][0]))
+            parts = clean_parts(json.loads(q["p"][0]))
+            path = full_path(q["v"][0], parts)
+            # never read through a link: it could lead outside the scanned folder
+            if plat.linked_ancestor(vol(q["v"][0])["root"], parts) or plat.is_link(os.lstat(path)):
+                raise ValueError("link")
             size = os.path.getsize(path)
         except (KeyError, ValueError, OSError):
             return self._send(404, {"error": "not found"})
@@ -917,6 +975,10 @@ class Handler(BaseHTTPRequestHandler):
         kind = b.get("kind") or "any"
         ext = (b.get("ext") or "").lower().lstrip(".")
         ign = core.ignored(core.load_settings(), vid)
+        # "personal": only the user's own files (what Simple mode suggests). Skips system and program folders,
+        # app data, game libraries, the Recycle Bin and hidden folders, and placeholder dates (before 1990).
+        personal = bool(b.get("personal")) and not is_cloud(vid)
+        root = vol(vid)["root"] if personal else None
 
         def name_ok(n):
             n = n.lower()
@@ -936,17 +998,22 @@ class Handler(BaseHTTPRequestHandler):
                     if ign and cp in ign:
                         continue
                     if d.size >= min_size and name_ok(d.name) and (cat is None or dominant(d.cats) == cat) \
-                            and (older is None or (d.mtime and d.mtime < older)) and not ext:
+                            and (older is None or (d.mtime and d.mtime < older)) and not ext \
+                            and not (personal and plat.managed(root, list(cp) + ["_"])):
                         hits.append((d.size, cp, "d", dominant(d.cats), d.age()))
             if kind != "dir":
                 for fn, sz, c, mt in n.files:
                     if sz >= min_size and name_ok(fn) and (cat is None or c == cat) \
-                            and (older is None or (mt and mt < older)) and not (ign and pp + (fn,) in ign):
+                            and (older is None or (mt and mt < older)) and not (ign and pp + (fn,) in ign) \
+                            and not (personal and (mt < plat.BOGUS_BEFORE or plat.managed(root, list(pp) + [fn]))):
                         hits.append((sz, pp + (fn,), "f", c, mt))
             for d in n.dirs:
                 cp = pp + (d.name,)
-                if not (ign and cp in ign):
-                    stack.append((d, cp))
+                if ign and cp in ign:
+                    continue
+                if personal and plat.managed(root, list(cp) + ["_"]):
+                    continue             # don't even look inside system / app-managed folders
+                stack.append((d, cp))
         total = sum(h[0] for h in hits if h[2] == "f") if kind == "file" else None
         best = heapq.nlargest(300, hits, key=lambda h: h[0])
         return {"items": [{"p": list(pp), "s": sz, "k": k, "c": c, "a": a} for sz, pp, k, c, a in best],
@@ -1005,7 +1072,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_recycle(self, b):
         vid, parts = b["drive"], b.get("path") or []
-        ok, err = trash_any(vid, parts)
+        expect = None
+        if not is_cloud(vid) and list_snaps(vid):   # what the scan saw there: a folder or a file
+            node, f = walk(drive_state(vid)["cur"], clean_parts(parts))
+            if node is not None or f is not None:
+                expect = [f is None]
+        ok, err = trash_any(vid, parts, expect)
         if not ok:
             return {"error": err}
         if err == "gone":
@@ -1013,8 +1085,7 @@ class Handler(BaseHTTPRequestHandler):
         s = drive_state(vid)
         with LOCK:
             remove_from_tree(s, parts)
-            tree, when, partial = s["cur"], s["cur_ts"], s["cur_partial"]
-        threading.Thread(target=core.save_snapshot, args=(vid, tree, when, partial), daemon=True).start()
+        resave(vid)
         return {"ok": True}
 
     def api_info(self, b):

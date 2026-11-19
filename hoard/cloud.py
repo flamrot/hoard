@@ -79,7 +79,8 @@ def refresh():
     vols = []
     for name, typ in rs:
         pretty = PRETTY.get(typ, typ.title())
-        v = {"id": "cloud-" + plat.slug(name), "root": name + ":", "remote": name, "backend": typ,
+        v = {"id": plat.vol_id("cloud", name), "legacy": plat.legacy_vol_id("cloud", name),
+             "root": name + ":", "remote": name, "backend": typ,
              "name": pretty if counts[typ] == 1 else f"{pretty} ({name})", "label": f"{pretty} · rclone “{name}”",
              "type": "cloud", "total": 0, "used": 0, "free": 0, "trashed": 0, "other": 0,
              "trashable": typ in TRASHABLE}
@@ -116,7 +117,14 @@ def volumes(force=False):
             finally:
                 _cache["busy"] = False
         threading.Thread(target=bg, daemon=True).start()
-    return [dict(v) for v in _cache["vols"] or []]
+    return [_with_ids(dict(v)) for v in _cache["vols"] or []]
+
+
+def _with_ids(v):
+    """The id comes from the exact remote name (a cache written by an older version may hold the old id)."""
+    name = v.get("remote") or v["root"].rstrip(":")
+    v["id"], v["legacy"] = plat.vol_id("cloud", name), plat.legacy_vol_id("cloud", name)
+    return v
 
 
 # ---------------------------------------------------------------- scanning

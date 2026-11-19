@@ -49,6 +49,8 @@ def main():
     do_trash = "--trash" in sys.argv
     if not args:
         fail("usage: smoke_test.py <app command...> [--trash]")
+    if os.path.isfile(args[0]):
+        args[0] = os.path.abspath(args[0])      # Windows won't start "dist/Hoard.exe" written with a forward slash
 
     tmp = tempfile.mkdtemp(prefix="hoard-smoke-")
     target, data = os.path.join(tmp, "target"), os.path.join(tmp, "data")

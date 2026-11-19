@@ -153,6 +153,109 @@ def slug(text):
     return s[:60] or "root"
 
 
+def vol_id(prefix, key):
+    """A volume id that can't collide: a readable part plus a hash of the exact root (or remote name).
+    Older versions used the readable part alone, so 'D:\\archive one' and 'D:\\archive-one' shared an id."""
+    import hashlib
+    h = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:10]
+    return f"{prefix}-{slug(key)[:40]}-{h}"
+
+
+def legacy_vol_id(prefix, key):
+    """The id older versions gave this volume (used once, to move its saved scans to the new id)."""
+    return f"{prefix}-{slug(key)}"
+
+
+# ---------------------------------------------------------------- what Hoard shouldn't *suggest* removing
+BOGUS_BEFORE = 631152000          # 1990-01-01: earlier "last changed" dates are placeholders, not real use
+
+_MANAGED_SEGMENTS = {"appdata", "program files", "program files (x86)", "programdata", "windows", "windowsapps",
+                     "system volume information", "recovery", "perflogs", "steamapps", "steamlibrary", "epic games",
+                     "xboxgames", "gog games", "node_modules", "site-packages", "library", "applications"}
+_MANAGED_FILES = {"pagefile.sys", "hiberfil.sys", "swapfile.sys", "dumpstack.log", "swapfile", "swap.img"}
+
+
+def _managed_prefixes():
+    home = os.path.expanduser("~")
+    if NAME == "windows":
+        roots = [os.environ.get(v) for v in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData",
+                                             "LOCALAPPDATA", "APPDATA")]
+    elif NAME == "macos":
+        roots = ["/System", "/Library", "/Applications", "/private", "/usr", "/opt", "/bin", "/sbin",
+                 os.path.join(home, "Library")]
+    else:
+        roots = ["/usr", "/var", "/opt", "/snap", "/etc", "/boot", "/lib", "/lib64", "/bin", "/sbin", "/proc", "/sys"]
+    return [os.path.normcase(r.rstrip("\\/")) for r in roots if r]
+
+
+def managed(root, parts):
+    """True for things the OS or an installed app manages: system and program folders, app data and
+    browser profiles, game libraries, the Recycle Bin, hidden folders, app bundles. These can still be
+    removed by hand from the map, but Hoard never *suggests* them in its friendly lists."""
+    segs = [p.casefold() for p in parts]
+    if not segs:
+        return True
+    if segs[-1] in _MANAGED_FILES:
+        return True
+    for s in segs[:-1]:
+        if s.startswith((".", "$")) or s.endswith(".app") or s in _MANAGED_SEGMENTS:
+            return True
+    full = os.path.normcase(os.path.join(root, *parts))
+    return any(full == p or full.startswith(p + os.sep) for p in _managed_prefixes())
+
+
+# ---------------------------------------------------------------- links and identity (checked right before removing)
+def is_link(st):
+    """A symlink, or a Windows junction / mount point / symlink (name-surrogate reparse point).
+    Cloud placeholders (OneDrive etc.) are reparse points too, but not links, so they don't count."""
+    import stat as _stat
+    if _stat.S_ISLNK(st.st_mode):
+        return True
+    return bool(getattr(st, "st_file_attributes", 0) & 0x400 and getattr(st, "st_reparse_tag", 0) & 0x20000000)
+
+
+def linked_ancestor(root, parts):
+    """The first folder between root and the item that is a link (or no longer a folder), else None."""
+    import stat as _stat
+    cur = root
+    for name in parts[:-1]:
+        cur = os.path.join(cur, name)
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            return None                       # missing: the caller finds the item gone
+        if is_link(st) or not _stat.S_ISDIR(st.st_mode):
+            return cur
+    return None
+
+
+def identity(path):
+    """(device, file id, is folder) of the item at path itself, not following links."""
+    import stat as _stat
+    st = os.lstat(path)
+    return [int(st.st_dev), int(st.st_ino), _stat.S_ISDIR(st.st_mode)]
+
+
+def pin_dir(path, expect=None):
+    """Hold a folder while clearing it. Returns a token, or None when it's a link, not a folder, or not the
+    folder we listed (`expect` = its file id). On Windows the handle also stops it being renamed or replaced."""
+    if NAME == "windows":
+        return _os.pin_dir(path, expect)
+    import stat as _stat
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if is_link(st) or not _stat.S_ISDIR(st.st_mode) or (expect and st.st_ino != expect):
+        return None
+    return path
+
+
+def unpin_dir(token):
+    if NAME == "windows" and token is not None:
+        _os.unpin_dir(token)
+
+
 def open_ui(url):
     """Show the UI. Returns True when a native window was shown and has been closed (the app should exit),
     False when the UI was handed to a browser (the app keeps serving until the page says goodbye)."""
