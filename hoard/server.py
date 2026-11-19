@@ -5,9 +5,10 @@ window (pywebview) when available, otherwise in a Chromium-style app window or t
 `--scan [ids…]` runs a headless scan (used by the daily schedule) and exits.
 Standard library only; OS-specific code lives in plat/.
 """
-import gzip
+import fnmatch
 import heapq
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -16,313 +17,30 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # find plat/ however we're launched
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # find our modules however we're launched
 import plat  # noqa: E402
+import core  # noqa: E402
+import cleanup  # noqa: E402
+import dupes  # noqa: E402
+import apps as appsmod  # noqa: E402
+import reports  # noqa: E402
+from core import OTHER, Node, dominant, human, list_snaps, walk  # noqa: E402
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 RES_DIR = getattr(sys, "_MEIPASS", APP_DIR)   # inside a PyInstaller bundle, data files live here
-DATA_DIR = plat.DATA_DIR
-SCANS_DIR = os.path.join(DATA_DIR, "scans")
-
-KEEP_FILE = 1 << 20      # files >= 1 MB are kept individually; smaller ones are aggregated
-MAX_FILES = 300          # max individual files kept per folder
 CHANGE_MIN = 50 << 20    # changes smaller than 50 MB are not listed
+DAY = 86400
+AGE_BUCKETS = (7, 30, 90, 365)          # days: newer than a week, month, 3 months, a year, older
 
 sys.setrecursionlimit(20000)
 threading.stack_size(128 * 1024 * 1024)
 
-# ---------------------------------------------------------------- categories
-CATS = ["video", "games", "apps", "archives", "media", "code", "docs", "models", "other"]
-OTHER = 8
-_EXT = {
-    0: "mp4 mkv mov avi wmv webm m4v flv mpg mpeg ts m2ts vob 3gp",
-    1: "pak ucas utoc vpk bsa ba2 gcf ncf upk uasset umap bnk wem forge rpf big pck assets resource sav",
-    2: "exe dll sys msi msix appx cab mui drv ocx cpl efi lib so pdb node dylib deb rpm pkg appimage snap flatpak",
-    3: "zip 7z rar tar gz tgz bz2 xz iso img vhd vhdx wim esd zst dmg qcow2 vmdk vdi raw",
-    4: "jpg jpeg png gif bmp webp tif tiff psd cr2 nef arw dng heic svg ico mp3 wav flac ogg m4a aac wma opus aiff",
-    5: "js mjs cjs ts tsx jsx py pyc pyd json map css scss html c h cpp hpp cs java class jar go rs rb php lua sh ps1 bat yml yaml toml lock md wasm o obj idx pack whl rlib",
-    6: "pdf doc docx xls xlsx ppt pptx txt rtf odt ods csv epub log pages numbers key",
-    7: "safetensors ckpt gguf ggml pt pth onnx bin h5 tflite pb npz npy mlmodel",
-}
-EXT = {e: c for c, s in _EXT.items() for e in s.split()}
-
-
-def cat_of(name):
-    i = name.rfind(".")
-    return EXT.get(name[i + 1:].lower(), OTHER) if i > 0 else OTHER
-
-
-def dominant(cats):
-    best = OTHER
-    for i, v in enumerate(cats):
-        if v > cats[best]:
-            best = i
-    return best
-
-
-def human(b):
-    a = abs(b)
-    for unit, n in (("TB", 1 << 40), ("GB", 1 << 30), ("MB", 1 << 20)):
-        if a >= n:
-            return f"{b / n:.1f} {unit}"
-    return f"{b / 1024:.0f} KB"
-
-
-# ---------------------------------------------------------------- tree
-class Node:
-    __slots__ = ("name", "size", "nfiles", "dirs", "files", "cats", "osize", "ocount", "_idx")
-
-    def __init__(self, name):
-        self.name = name
-        self.size = 0
-        self.nfiles = 0
-        self.dirs = []
-        self.files = []          # (name, size, cat)
-        self.cats = [0] * 9
-        self.osize = 0           # bytes in small files not kept individually
-        self.ocount = 0
-        self._idx = None
-
-    def child(self, name):
-        if self._idx is None:
-            self._idx = {d.name: d for d in self.dirs}
-        return self._idx.get(name)
-
-    def file(self, name):
-        for f in self.files:
-            if f[0] == name:
-                return f
-        return None
-
-
-class Scan:
-    def __init__(self, vol, used):
-        self.drive = vol
-        self.used = used
-        self.files = 0
-        self.bytes = 0
-        self.errors = 0
-        self.current = ""
-        self.started = time.time()
-        self.cancel = False
-        self.running = True
-        self.error = None
-        self.exclude = set()
-        self._tick = 0
-
-
-def scan_dir(path, name, st):
-    node = Node(name)
-    kept = []
-    size_of = plat.size_of
-    exclude = st.exclude
-    try:
-        it = os.scandir(path)
-    except OSError:
-        st.errors += 1
-        return node
-    with it:
-        for e in it:
-            if st.cancel:
-                break
-            try:
-                if e.is_dir(follow_symlinks=False):
-                    if e.is_junction() or e.is_symlink() or (exclude and e.path in exclude):
-                        continue
-                    c = scan_dir(e.path, e.name, st)
-                    node.dirs.append(c)
-                    node.size += c.size
-                    node.nfiles += c.nfiles
-                    nc = node.cats
-                    for i, v in enumerate(c.cats):
-                        if v:
-                            nc[i] += v
-                elif e.is_file(follow_symlinks=False):
-                    sz = size_of(e.stat(follow_symlinks=False))
-                    c = cat_of(e.name)
-                    node.size += sz
-                    node.nfiles += 1
-                    node.cats[c] += sz
-                    st.files += 1
-                    st.bytes += sz
-                    if sz >= KEEP_FILE:
-                        kept.append((sz, e.name, c))
-                    else:
-                        node.osize += sz
-                        node.ocount += 1
-            except OSError:
-                st.errors += 1
-    if len(kept) > MAX_FILES:
-        kept.sort(reverse=True)
-        for f in kept[MAX_FILES:]:
-            node.osize += f[0]
-            node.ocount += 1
-        kept = kept[:MAX_FILES]
-    node.files = [(n, s, c) for s, n, c in kept]
-    st._tick += 1
-    if st._tick & 63 == 0:
-        st.current = path
-    return node
-
-
-def scan_volume(v, st):
-    st.exclude = {os.path.normpath(p) for p in plat.scan_excludes(v["root"])}
-    return scan_dir(v["root"], v["name"], st)
-
-
-# ---------------------------------------------------------------- snapshots (scan history)
-# scans/<volume id>/<unix time>.json.gz  —  line 1: meta JSON, line 2: the tree
-def _enc(n):
-    return [n.name, n.size, n.nfiles, n.cats, n.osize, n.ocount,
-            [list(f) for f in n.files], [_enc(d) for d in n.dirs]]
-
-
-def _dec(a):
-    n = Node(a[0])
-    n.size, n.nfiles, n.cats, n.osize, n.ocount = a[1], a[2], a[3], a[4], a[5]
-    n.files = [tuple(f) for f in a[6]]
-    n.dirs = [_dec(d) for d in a[7]]
-    return n
-
-
-def vol_dir(vid):
-    return os.path.join(SCANS_DIR, vid)
-
-
-def snap_path(vid, ts):
-    return os.path.join(vol_dir(vid), f"{int(ts)}.json.gz")
-
-
-def list_snaps(vid):
-    """Snapshot timestamps for a volume, newest first."""
-    try:
-        names = os.listdir(vol_dir(vid))
-    except OSError:
-        return []
-    return sorted((int(n[:-8]) for n in names if n.endswith(".json.gz") and n[:-8].isdigit()), reverse=True)
-
-
-def new_ts(vid):
-    """Timestamp for a new snapshot: now, but always after the newest one (two scans can finish in the same second)."""
-    snaps = list_snaps(vid)
-    return max(int(time.time()), (snaps[0] + 1) if snaps else 0)
-
-
-def save_snapshot(vid, tree, when, partial=False):
-    os.makedirs(vol_dir(vid), exist_ok=True)
-    p = snap_path(vid, when)
-    tmp = p + ".tmp"
-    with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=1) as f:
-        f.write(json.dumps({"v": 2, "time": int(when), "total": tree.size, "files": tree.nfiles,
-                            "partial": partial}) + "\n")
-        json.dump(_enc(tree), f, separators=(",", ":"))
-    os.replace(tmp, p)
-
-
-def snap_meta(vid, ts):
-    try:
-        with gzip.open(snap_path(vid, ts), "rt", encoding="utf-8") as f:
-            return json.loads(f.readline())
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def load_snapshot(vid, ts):
-    try:
-        with gzip.open(snap_path(vid, ts), "rt", encoding="utf-8") as f:
-            meta = json.loads(f.readline())
-            tree = _dec(json.loads(f.read()))
-        return tree, meta
-    except Exception:  # noqa: BLE001
-        return None, None
-
-
-def prune(vid, keep):
-    for ts in list_snaps(vid)[max(2, keep):]:
-        try:
-            os.remove(snap_path(vid, ts))
-        except OSError:
-            pass
-
-
-def migrate_v1():
-    """Move scans saved by the first version (scan_<id>.latest/prev.json.gz) into scans/<id>/."""
-    try:
-        names = os.listdir(DATA_DIR)
-    except OSError:
-        return
-    for n in names:
-        m = re.fullmatch(r"scan_(.+)\.(latest|prev)\.json\.gz", n)
-        if not m:
-            continue
-        p = os.path.join(DATA_DIR, n)
-        try:
-            with gzip.open(p, "rt", encoding="utf-8") as f:
-                d = json.load(f)
-            save_snapshot(m.group(1), _dec(d["root"]), d["time"], d.get("partial", False))
-            os.remove(p)
-        except Exception:  # noqa: BLE001 - leave the old file in place and note why
-            import traceback
-            with open(os.path.join(DATA_DIR, "error.log"), "a", encoding="utf-8") as log:
-                log.write(f"{time.ctime()} migrating {n}:\n{traceback.format_exc()}\n")
-
-
-def storage_bytes():
-    total = 0
-    for root, _dirs, files in os.walk(SCANS_DIR):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
-    return total
-
-
-# ---------------------------------------------------------------- settings & report
-DEFAULTS = {"schedule": {"enabled": False, "time": "07:00", "volumes": []},
-            "keep": 30, "notifyGB": 1.0, "theme": "system"}
-
-
-def load_settings():
-    s = json.loads(json.dumps(DEFAULTS))
-    try:
-        with open(os.path.join(DATA_DIR, "settings.json"), encoding="utf-8") as f:
-            d = json.load(f)
-        s.update({k: v for k, v in d.items() if k in s and k != "schedule"})
-        s["schedule"].update({k: v for k, v in d.get("schedule", {}).items() if k in s["schedule"]})
-    except (OSError, ValueError):
-        pass
-    return s
-
-
-def save_settings(s):
-    p = os.path.join(DATA_DIR, "settings.json")
-    with open(p + ".tmp", "w", encoding="utf-8") as f:
-        json.dump(s, f, indent=2)
-    os.replace(p + ".tmp", p)
-
-
-def read_report():
-    try:
-        with open(os.path.join(DATA_DIR, "report.json"), encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return []
-
-
-def append_report(entry):
-    r = (read_report() + [entry])[-100:]
-    p = os.path.join(DATA_DIR, "report.json")
-    with open(p + ".tmp", "w", encoding="utf-8") as f:
-        json.dump(r, f)
-    os.replace(p + ".tmp", p)
-
-
 # ---------------------------------------------------------------- volumes & state
 LOCK = threading.RLock()
 STATE = {}          # vol id -> see drive_state()
-JOB = {"scan": None}
+JOB = {"scan": None, "cleanup": None, "dupes": None}
 VOLS = {}           # vol id -> volume dict from plat.list_volumes()
 
 
@@ -361,7 +79,7 @@ def _tree(s, vid, ts):
     """Load a snapshot through a small per-volume cache (current + baseline + one spare)."""
     if ts in s["trees"]:
         return s["trees"][ts]
-    tree, meta = load_snapshot(vid, ts)
+    tree, meta = core.load_snapshot(vid, ts)
     if tree is None:
         return None, False
     s["trees"][ts] = (tree, bool(meta.get("partial")))
@@ -378,51 +96,80 @@ def drive_state(vid):
         s = STATE.get(vid)
         if s is None:
             s = STATE[vid] = {"cur": None, "cur_ts": None, "cur_partial": False, "prev": None, "prev_ts": None,
-                              "prev_partial": False, "base_pick": None, "changes": None, "trees": {}}
+                              "prev_partial": False, "base_pick": None, "changes": None, "trees": {}, "cache": {}}
         snaps = list_snaps(vid)
         newest = snaps[0] if snaps else None
         if newest != s["cur_ts"]:
             s["cur_ts"] = newest
             s["cur"], s["cur_partial"] = _tree(s, vid, newest) if newest else (None, False)
             s["changes"] = None
+            s["cache"] = {}
         want = s["base_pick"] if s["base_pick"] in snaps[1:] else (snaps[1] if len(snaps) > 1 else None)
         if want != s["prev_ts"]:
             s["prev_ts"] = want
             s["prev"], s["prev_partial"] = _tree(s, vid, want) if want else (None, False)
             s["changes"] = None
+            s["cache"] = {}
         return s
+
+
+def current_trees():
+    """(root, tree) for every connected volume that has a scan."""
+    out = []
+    for vid, v in list(VOLS.items()):
+        if list_snaps(vid):
+            s = drive_state(vid)
+            if s["cur"] is not None:
+                out.append((v["root"], s["cur"]))
+    return out
+
+
+def locate(path):
+    """(vol id, parts, node or None) for an absolute path inside a scanned volume (longest root wins)."""
+    best = None
+    for vid, v in VOLS.items():
+        parts = core.rel_parts(v["root"], path)
+        if parts is not None and list_snaps(vid) and (best is None or len(v["root"]) > len(VOLS[best[0]]["root"])):
+            best = (vid, parts)
+    if best is None:
+        return None, None, None
+    s = drive_state(best[0])
+    node, f = walk(s["cur"], best[1]) if s["cur"] is not None else (None, None)
+    return best[0], best[1], (f if f else node)
 
 
 def run_scan(vid):
     st = JOB["scan"]
     try:
         v = vol(vid)
-        tree = scan_volume(v, st)
+        tree = core.scan_volume(v, st)
         if st.cancel:
             return
         st.current = "Saving…"
-        now = new_ts(vid)
+        now = core.new_ts(vid)
         with LOCK:
             s = drive_state(vid)
             s["trees"][now] = (tree, False)   # so the state switch below doesn't re-read it from disk
-        save_snapshot(vid, tree, now)
-        prune(vid, load_settings()["keep"])
+        core.save_snapshot(vid, tree, now)
+        core.prune(vid, core.load_settings()["keep"])
         with LOCK:
             s["base_pick"] = None              # compare the new scan with the one before it
             drive_state(vid)
     except Exception as ex:  # noqa: BLE001
         st.error = str(ex)
+        import traceback
+        core.log_error("scan", traceback.format_exc())
     finally:
         st.running = False
 
 
 def headless_scan(ids=None):
     """Scan the given volumes (default: the ones chosen in Settings), save, prune, report, notify."""
-    migrate_v1()
-    settings = load_settings()
+    core.migrate_v1()
+    settings = core.load_settings()
     vols = {v["id"]: v for v in volumes()}
-    ids = ids or settings["schedule"]["volumes"] or [next(iter(vols))] if vols else []
-    lock = os.path.join(DATA_DIR, "scan.lock")
+    ids = ids or settings["schedule"]["volumes"] or ([next(iter(vols))] if vols else [])
+    lock = os.path.join(core.DATA_DIR, "scan.lock")
     try:
         os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
     except FileExistsError:
@@ -436,27 +183,42 @@ def headless_scan(ids=None):
             if v is None:
                 continue
             t0 = time.time()
-            st = Scan(vid, 0)
-            tree = scan_volume(v, st)
-            now = new_ts(vid)
+            st = core.Scan(vid, 0)
+            tree = core.scan_volume(v, st)
+            now = core.new_ts(vid)
             before = list_snaps(vid)
-            save_snapshot(vid, tree, now)
-            prune(vid, settings["keep"])
+            core.save_snapshot(vid, tree, now)
+            core.prune(vid, settings["keep"])
             entry = {"vol": vid, "name": v["name"], "time": now, "total": tree.size, "files": tree.nfiles,
                      "errors": st.errors, "secs": round(time.time() - t0), "auto": True}
+            prev, ch = None, []
             if before:
-                prev, meta = load_snapshot(vid, before[0])
+                prev, meta = core.load_snapshot(vid, before[0])
                 if prev is not None:
                     ch = all_changes({"cur": tree, "prev": prev, "prev_partial": bool(meta.get("partial")),
                                       "changes": None})
                     entry.update(since=before[0], delta=tree.size - prev.size,
                                  top=[{"p": list(pp), "d": d} for d, pp, *_ in ch[:5]])
-            append_report(entry)
+            core.append_report(entry)
             limit = float(settings.get("notifyGB") or 0) * (1 << 30)
             if limit and entry.get("delta", 0) >= limit:
                 top = entry.get("top") or []
                 body = f"Biggest change: {top[0]['p'][-1]} +{human(top[0]['d'])}" if top else "Open Hoard to see what grew."
                 plat.notify(f"{v['name']} grew {human(entry['delta'])} since the last scan", body)
+            for w in settings.get("watch", []):           # folder size alerts
+                if w.get("vol") != vid:
+                    continue
+                node, _ = walk(tree, w["path"])
+                old, _ = walk(prev, w["path"]) if prev is not None else (None, None)
+                lim = float(w["gb"]) * (1 << 30)
+                if node is not None and node.size > lim and (old is None or old.size <= lim):
+                    plat.notify(f"{w['path'][-1] if w['path'] else v['name']} passed {w['gb']:g} GB",
+                                f"It's now {human(node.size)}. Open Hoard to see what's inside.")
+            if settings.get("reportDir"):
+                try:
+                    save_report(vid, v, tree, now, prev, before[0] if before else None, ch, settings["reportDir"])
+                except OSError as ex:
+                    core.log_error("saving report", str(ex))
     finally:
         try:
             os.remove(lock)
@@ -491,21 +253,6 @@ def prev_file(pn, name, partial):
     return None if partial else 0
 
 
-def walk(node, parts):
-    """Return (node, file_tuple_or_None). parts may end at a file."""
-    n = node
-    for i, p in enumerate(parts):
-        c = n.child(p)
-        if c is None:
-            if i == len(parts) - 1:
-                f = n.file(p)
-                if f:
-                    return n, f
-            return None, None
-        n = c
-    return n, None
-
-
 def walk_prev(s, parts):
     pn = s["prev"]
     for p in parts:
@@ -513,23 +260,35 @@ def walk_prev(s, parts):
     return pn
 
 
-def view_json(node, pn, partial, depth, minb):
-    out = {"n": node.name, "s": node.size, "k": "d", "f": node.nfiles, "c": dominant(node.cats)}
+def is_ignored(parts, ign):
+    t = tuple(parts)
+    return any(t[:len(i)] == i for i in ign)
+
+
+def view_json(node, pn, partial, depth, minb, parts, ign):
+    out = {"n": node.name, "s": node.size, "k": "d", "f": node.nfiles, "c": dominant(node.cats), "a": node.age()}
     if pn is not None:
         out["d"] = node.size - (0 if pn is NEW else pn.size)
     if depth <= 0:
         return out
     items = []
-    small_s, small_n = node.osize, node.ocount
+    small_s, small_n, ign_s = node.osize, node.ocount, 0
     for d in node.dirs:
+        cp = parts + (d.name,)
+        if ign and cp in ign:
+            ign_s += d.size
+            continue
         if d.size >= minb and d.size > 0:
-            items.append(view_json(d, prev_child(pn, d.name, partial), partial, depth - 1, minb))
+            items.append(view_json(d, prev_child(pn, d.name, partial), partial, depth - 1, minb, cp, ign))
         else:
             small_s += d.size
             small_n += d.nfiles
-    for n, sz, c in node.files:
+    for n, sz, c, mt in node.files:
+        if ign and parts + (n,) in ign:
+            ign_s += sz
+            continue
         if sz >= minb:
-            it = {"n": n, "s": sz, "k": "f", "c": c}
+            it = {"n": n, "s": sz, "k": "f", "c": c, "a": mt}
             ps = prev_file(pn, n, partial)
             if ps is not None:
                 it["d"] = sz - ps
@@ -544,21 +303,33 @@ def view_json(node, pn, partial, depth, minb):
             small_n += it.get("f", 1)
         items = items[:160]
     if small_s > 0:
-        items.append({"n": f"{small_n:,} smaller item{'s' if small_n != 1 else ''}", "s": small_s, "k": "o", "c": OTHER})
+        items.append({"n": f"{small_n:,} smaller item{'s' if small_n != 1 else ''}", "s": small_s, "k": "o",
+                      "c": OTHER, "a": node.own})
     out["ch"] = items
+    if ign_s:
+        out["ign"] = ign_s
     return out
 
 
-def top_files(node, parts, s, limit=100):
-    def gen(n, pp):
+def iter_files(node, parts, ign):
+    """Every individually kept file under node: (size, parts, cat, mtime)."""
+    stack = [(node, tuple(parts))]
+    while stack:
+        n, pp = stack.pop()
         for f in n.files:
-            yield f[1], pp + (f[0],), f[2]
+            if not (ign and pp + (f[0],) in ign):
+                yield f[1], pp + (f[0],), f[2], f[3]
         for d in n.dirs:
-            yield from gen(d, pp + (d.name,))
-    best = heapq.nlargest(limit, gen(node, tuple(parts)), key=lambda x: x[0])
+            cp = pp + (d.name,)
+            if not (ign and cp in ign):
+                stack.append((d, cp))
+
+
+def top_files(node, parts, s, ign, limit=100):
+    best = heapq.nlargest(limit, iter_files(node, parts, ign), key=lambda x: x[0])
     out = []
-    for sz, pp, c in best:
-        it = {"p": list(pp), "s": sz, "c": c, "k": "f"}
+    for sz, pp, c, mt in best:
+        it = {"p": list(pp), "s": sz, "c": c, "k": "f", "a": mt}
         if s["prev"] is not None:
             pn = walk_prev(s, pp[:-1])
             ps = prev_file(pn, pp[-1], s["prev_partial"])
@@ -583,7 +354,7 @@ def all_changes(s):
             cd = rec(c, prev_child(pn, c.name, partial), pp + (c.name,))
             if cd is not None and cd > biggest:
                 biggest = cd
-        for fn, sz, cat in n.files:
+        for fn, sz, cat, _mt in n.files:
             ps = prev_file(pn, fn, partial)
             if ps is None:
                 continue
@@ -604,8 +375,39 @@ def all_changes(s):
     return out
 
 
+def age_histogram(node, parts, ign):
+    """Bytes by last-modified age: [<1 week, <1 month, <3 months, <1 year, older, unknown]."""
+    now = time.time()
+    edges = [now - d * DAY for d in AGE_BUCKETS]
+    hist = [0] * 6
+
+    def add(size, mt):
+        if not mt:
+            hist[5] += size
+            return
+        for i, e in enumerate(edges):
+            if mt >= e:
+                hist[i] += size
+                return
+        hist[4] += size
+    stack = [(node, tuple(parts))]
+    while stack:
+        n, pp = stack.pop()
+        for f in n.files:
+            if not (ign and pp + (f[0],) in ign):
+                add(f[1], f[3])
+        add(n.osize, n.own)
+        for d in n.dirs:
+            cp = pp + (d.name,)
+            if not (ign and cp in ign):
+                stack.append((d, cp))
+    return hist
+
+
 def remove_from_tree(s, parts):
     tree = s["cur"]
+    if tree is None:
+        return
     chain = [tree]
     n = tree
     for p in parts[:-1]:
@@ -615,44 +417,131 @@ def remove_from_tree(s, parts):
         chain.append(n)
     last = parts[-1]
     d = n.child(last)
-    if d is not None:
-        size, nf, cats = d.size, d.nfiles, d.cats
+    if d is not None and d.name == last:
+        size, nf, cats, msum = d.size, d.nfiles, d.cats, d.msum
         n.dirs.remove(d)
         n._idx = None
     else:
         f = n.file(last)
         if f is None:
             return
-        size, nf = f[1], 1
+        size, nf, msum = f[1], 1, f[1] * f[3]
         cats = [0] * 9
         cats[f[2]] = f[1]
         n.files.remove(f)
     for a in chain:
         a.size -= size
         a.nfiles -= nf
+        a.msum -= msum
         for i, v in enumerate(cats):
             a.cats[i] -= v
     s["changes"] = None
+    s["cache"] = {}
+
+
+def save_report(vid, v, tree, now, prev, prev_ts, changes, folder, parts=()):
+    node, _ = walk(tree, list(parts))
+    sep = os.sep
+    root = v["root"].rstrip(sep)
+    joinp = lambda pp: root + sep + sep.join(pp) if pp else v["root"]   # noqa: E731
+    ch = [(d, joinp(pp), sz) for d, pp, _k, sz, _c in changes if tuple(pp[:len(parts)]) == tuple(parts)][:30]
+    folders = sorted(((joinp(tuple(parts) + (d.name,)), d.size) for d in node.dirs), key=lambda x: -x[1])[:30]
+    files = [(joinp(pp), sz) for sz, pp, _c, _m in heapq.nlargest(30, iter_files(node, parts, set()), key=lambda x: x[0])]
+    pnode = walk(prev, list(parts))[0] if prev is not None else None
+    html_text = reports.report_html(f"Hoard report: {node.name}", v["name"], now, node.size,
+                                    prev_ts, node.size - pnode.size if pnode is not None else None, ch, folders, files)
+    path = reports.unique_path(folder, f"Hoard report {v['name'].strip(':')} {time.strftime('%Y-%m-%d %H%M', time.localtime(now))}", "html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html_text)
+    return path
+
+
+# ---------------------------------------------------------------- staging area
+def staged_add(items):
+    cur = core.read_staged()
+    added = 0
+    for it in items:
+        vid, parts = it["vol"], list(it["path"])
+        if not parts:
+            continue
+        if any(x["vol"] == vid and x["path"] == parts[:len(x["path"])] for x in cur):
+            continue          # already staged, or inside something staged
+        cur = [x for x in cur if not (x["vol"] == vid and x["path"][:len(parts)] == parts)]   # drop children
+        cur.append({"vol": vid, "path": parts, "name": it.get("name") or parts[-1], "size": int(it.get("size") or 0),
+                    "kind": it.get("kind") or "f", "c": int(it.get("c") or OTHER)})
+        added += 1
+    core.write_staged(cur)
+    return added
+
+
+def staged_trash():
+    items = core.read_staged()
+    done, failed, freed, touched = [], [], 0, set()
+    for it in items:
+        try:
+            v = vol(it["vol"])
+            p = os.path.join(v["root"], *it["path"])
+            why = plat.protected(v["root"], it["path"], p)
+            if why:
+                raise ValueError(why)
+            if not os.path.lexists(p):
+                done.append(it)       # already gone
+                continue
+            ok, err = plat.trash(p)
+            if not ok:
+                raise ValueError(err)
+            done.append(it)
+            freed += it["size"]
+            if list_snaps(it["vol"]):
+                with LOCK:
+                    remove_from_tree(drive_state(it["vol"]), it["path"])
+                touched.add(it["vol"])
+        except Exception as ex:  # noqa: BLE001
+            failed.append(dict(it, error=str(ex)))
+    core.write_staged(failed)
+    for vid in touched:
+        s = drive_state(vid)
+        threading.Thread(target=core.save_snapshot, args=(vid, s["cur"], s["cur_ts"], s["cur_partial"]), daemon=True).start()
+    return {"done": len(done), "failed": failed, "size": freed}
+
+
+def stage_from_abs(paths):
+    """Turn absolute paths (from cleanup suggestions / apps) into staging items on their volumes."""
+    volumes()
+    items = []
+    for c in paths:
+        best = None
+        for vid, v in VOLS.items():
+            parts = core.rel_parts(v["root"], c["path"])
+            if parts and (best is None or len(v["root"]) > len(VOLS[best[0]]["root"])):
+                best = (vid, parts)
+        if best:
+            items.append({"vol": best[0], "path": best[1], "name": c.get("name"), "size": c.get("size"),
+                          "kind": c.get("kind"), "c": c.get("c", OTHER)})
+    return staged_add(items)
 
 
 # ---------------------------------------------------------------- http
 TOKEN = secrets.token_urlsafe(24)
 LAST_SEEN = {"t": time.time(), "bye": None}
+APPS_CACHE = {"t": 0, "items": []}
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Hoard/2"
+    server_version = "Hoard/3"
 
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", extra=None):
         if not isinstance(body, (bytes, bytearray)):
             body = json.dumps(body, separators=(",", ":")).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -663,11 +552,61 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._host_ok():
             return self._send(403, {"error": "bad host"})
-        if self.path in ("/", "/index.html") or self.path.startswith("/?"):
+        u = urlparse(self.path)
+        if u.path in ("/", "/index.html"):
             with open(os.path.join(RES_DIR, "ui.html"), "rb") as f:
-                html = f.read().replace(b"__TOKEN__", TOKEN.encode())
-            return self._send(200, html, "text/html; charset=utf-8")
+                html_bytes = f.read().replace(b"__TOKEN__", TOKEN.encode())
+            return self._send(200, html_bytes, "text/html; charset=utf-8")
+        if u.path == "/file":
+            return self._file(parse_qs(u.query))
         self._send(404, {"error": "not found"})
+
+    def _file(self, q):
+        """Stream a file for the preview (images, video, audio, PDF, text). Range requests supported."""
+        if (q.get("t") or [""])[0] != TOKEN:
+            return self._send(403, {"error": "bad token"})
+        try:
+            path = full_path(q["v"][0], json.loads(q["p"][0]))
+            size = os.path.getsize(path)
+        except (KeyError, ValueError, OSError):
+            return self._send(404, {"error": "not found"})
+        if not os.path.isfile(path):
+            return self._send(404, {"error": "not a file"})
+        ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        if ctype in ("text/html", "application/xhtml+xml", "text/xml", "application/xml", "text/javascript"):
+            ctype = "text/plain"            # show markup as text; never run it in the app's page
+        start, end, code = 0, size - 1, 200
+        m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+        if m and size:
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            elif m.group(2):
+                start = max(0, size - int(m.group(2)))
+            code = 206
+        if start > end and size:
+            return self._send(416, b"", "text/plain", {"Content-Range": f"bytes */{size}"})
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(max(0, end - start + 1)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "sandbox")
+        if code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    b = f.read(min(1 << 20, left))
+                    if not b:
+                        break
+                    self.wfile.write(b)
+                    left -= len(b)
+        except (OSError, ConnectionError):
+            pass
 
     def do_POST(self):
         if not self._host_ok():
@@ -691,16 +630,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._send(200, fn(body))
         except Exception as ex:  # noqa: BLE001
+            import traceback
+            core.log_error(f"api {name}", traceback.format_exc())
             self._send(500, {"error": str(ex)})
 
-    # --- endpoints
+    # ---------------------------------------------------------- disks & scanning
     def api_ping(self, b):
         return {}
 
     def api_drives(self, b):
+        st = core.load_settings()
         return {"drives": volumes(), "os": plat.NAME, "sep": os.sep,
-                "trashName": plat.TRASH_NAME, "revealName": plat.REVEAL_NAME,
-                "theme": load_settings()["theme"]}
+                "trashName": plat.TRASH_NAME, "revealName": plat.REVEAL_NAME, "theme": st["theme"],
+                "ignore": st["ignore"], "watch": st["watch"], "hiddenNote": plat.HIDDEN_NOTE}
 
     def api_open_drive(self, b):
         s = drive_state(b["drive"])
@@ -718,7 +660,7 @@ class Handler(BaseHTTPRequestHandler):
             used = u.total - u.free
         except OSError:
             used = 0
-        JOB["scan"] = Scan(vid, used)
+        JOB["scan"] = core.Scan(vid, used)
         threading.Thread(target=run_scan, args=(vid,), daemon=True).start()
         return {"ok": True}
 
@@ -736,48 +678,147 @@ class Handler(BaseHTTPRequestHandler):
                 "errors": j.errors, "current": j.current, "elapsed": time.time() - j.started,
                 "cancelled": j.cancel, "error": j.error}
 
+    # ---------------------------------------------------------- map and lists
     def api_view(self, b):
-        s = drive_state(b["drive"])
+        vid = b["drive"]
+        s = drive_state(vid)
         if s["cur"] is None:
             return {"none": True}
         parts = b.get("path") or []
+        ign = core.ignored(core.load_settings(), vid)
         with LOCK:
             node, f = walk(s["cur"], parts)
             if node is None or f is not None:
                 return {"missing": True}
             pn = walk_prev(s, parts)
-            v = view_json(node, pn, s["prev_partial"], int(b.get("depth", 8)), max(1, node.size * 0.0004))
+            v = view_json(node, pn, s["prev_partial"], int(b.get("depth", 8)), max(1, node.size * 0.0004),
+                          tuple(parts), ign)
             v["cats"] = list(node.cats)
-        return {"view": v, "path": parts, "time": s["cur_ts"], "prevTime": s["prev_ts"],
-                "partial": s["cur_partial"]}
+            if not parts and not s["cur_partial"] and VOLS.get(vid, {}).get("type") != "folder":
+                hidden = VOLS[vid]["used"] - node.size
+                if hidden > (1 << 30):
+                    v["hidden"] = hidden
+        return {"view": v, "path": parts, "time": s["cur_ts"], "prevTime": s["prev_ts"], "partial": s["cur_partial"]}
 
     def api_files(self, b):
         s = drive_state(b["drive"])
         if s["cur"] is None:
             return {"items": []}
-        node, f = walk(s["cur"], b.get("path") or [])
+        parts = b.get("path") or []
+        node, f = walk(s["cur"], parts)
         if node is None:
             return {"items": []}
         with LOCK:
-            return {"items": top_files(node, b.get("path") or [], s)}
+            return {"items": top_files(node, parts, s, core.ignored(core.load_settings(), b["drive"]))}
 
     def api_changes(self, b):
         s = drive_state(b["drive"])
         if s["prev"] is None:
             return {"items": [], "noPrev": True}
         parts = tuple(b.get("path") or [])
+        ign = core.ignored(core.load_settings(), b["drive"])
         with LOCK:
             ch = all_changes(s)
         k = len(parts)
         items = [{"p": list(pp), "d": d, "k": kind, "s": sz, "c": c}
-                 for d, pp, kind, sz, c in ch if pp[:k] == parts and len(pp) > k][:100]
+                 for d, pp, kind, sz, c in ch if pp[:k] == parts and len(pp) > k and not is_ignored(pp, ign)][:100]
         return {"items": items, "prevTime": s["prev_ts"]}
+
+    def api_ages(self, b):
+        vid = b["drive"]
+        s = drive_state(vid)
+        parts = tuple(b.get("path") or [])
+        key = ("ages", parts)
+        if key not in s["cache"]:
+            node, _ = walk(s["cur"], list(parts))
+            if node is None:
+                return {"hist": [0] * 6}
+            s["cache"][key] = age_histogram(node, parts, core.ignored(core.load_settings(), vid))
+        return {"hist": s["cache"][key], "buckets": AGE_BUCKETS}
+
+    def api_types(self, b):
+        vid = b["drive"]
+        s = drive_state(vid)
+        parts = b.get("path") or []
+        node, _ = walk(s["cur"], parts)
+        if node is None:
+            return {"items": []}
+        tot = {}
+        for sz, _pp, _c, _m in iter_files(node, parts, core.ignored(core.load_settings(), vid)):
+            name = _pp[-1]
+            e = core.ext_of(name) or "(no extension)"
+            t = tot.setdefault(e, [0, 0])
+            t[0] += sz
+            t[1] += 1
+        items = sorted(({"ext": e, "s": v[0], "n": v[1], "c": core.cat_of("x." + e)} for e, v in tot.items()),
+                       key=lambda x: -x["s"])[:150]
+        return {"items": items, "tracked": sum(i["s"] for i in items), "total": node.size}
+
+    def api_search(self, b):
+        vid = b["drive"]
+        s = drive_state(vid)
+        parts = b.get("path") or []
+        node, _ = walk(s["cur"], parts)
+        if node is None:
+            return {"items": []}
+        q = (b.get("q") or "").strip().lower()
+        wild = any(ch in q for ch in "*?[")
+        min_size = int(b.get("minSize") or 0)
+        cat = b.get("cat")
+        cat = int(cat) if cat not in (None, "", -1, "-1") else None
+        older = time.time() - float(b["olderDays"]) * DAY if b.get("olderDays") else None
+        kind = b.get("kind") or "any"
+        ext = (b.get("ext") or "").lower().lstrip(".")
+        ign = core.ignored(core.load_settings(), vid)
+
+        def name_ok(n):
+            n = n.lower()
+            if ext and not n.endswith("." + ext):
+                return False
+            if not q:
+                return True
+            return fnmatch.fnmatch(n, q) if wild else q in n
+
+        hits = []
+        stack = [(node, tuple(parts))]
+        while stack:
+            n, pp = stack.pop()
+            if kind != "file":
+                for d in n.dirs:
+                    cp = pp + (d.name,)
+                    if ign and cp in ign:
+                        continue
+                    if d.size >= min_size and name_ok(d.name) and (cat is None or dominant(d.cats) == cat) \
+                            and (older is None or (d.mtime and d.mtime < older)) and not ext:
+                        hits.append((d.size, cp, "d", dominant(d.cats), d.age()))
+            if kind != "dir":
+                for fn, sz, c, mt in n.files:
+                    if sz >= min_size and name_ok(fn) and (cat is None or c == cat) \
+                            and (older is None or (mt and mt < older)) and not (ign and pp + (fn,) in ign):
+                        hits.append((sz, pp + (fn,), "f", c, mt))
+            for d in n.dirs:
+                cp = pp + (d.name,)
+                if not (ign and cp in ign):
+                    stack.append((d, cp))
+        total = sum(h[0] for h in hits if h[2] == "f") if kind == "file" else None
+        best = heapq.nlargest(300, hits, key=lambda h: h[0])
+        return {"items": [{"p": list(pp), "s": sz, "k": k, "c": c, "a": a} for sz, pp, k, c, a in best],
+                "count": len(hits), "total": total}
+
+    def api_trend(self, b):
+        vid = b["drive"]
+        key = "/".join(b.get("path") or [])
+        pts = []
+        for ts in reversed(list_snaps(vid)):
+            idx = core.load_index(vid, ts)
+            pts.append({"ts": ts, "s": idx.get(key)})
+        return {"points": pts}
 
     def api_history(self, b):
         vid = b["drive"]
         out = []
         for ts in list_snaps(vid):
-            m = snap_meta(vid, ts) or {}
+            m = core.snap_meta(vid, ts) or {}
             out.append({"ts": ts, "total": m.get("total"), "files": m.get("files"), "partial": m.get("partial", False)})
         s = drive_state(vid)
         return {"items": out, "cur": s["cur_ts"], "base": s["prev_ts"]}
@@ -790,11 +831,19 @@ class Handler(BaseHTTPRequestHandler):
             s = drive_state(vid)
         return {"prevTime": s["prev_ts"]}
 
+    # ---------------------------------------------------------- acting on items
     def api_reveal(self, b):
+        p = full_path(b["drive"], b.get("path") or []) if "drive" in b else b.get("abs", "")
+        if not p or not os.path.lexists(p):
+            return {"error": "That item no longer exists."}
+        plat.reveal(p)
+        return {"ok": True}
+
+    def api_open(self, b):
         p = full_path(b["drive"], b.get("path") or [])
         if not os.path.lexists(p):
             return {"error": "That item no longer exists."}
-        plat.reveal(p)
+        plat.open_default(p)
         return {"ok": True}
 
     def api_recycle(self, b):
@@ -812,16 +861,203 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             remove_from_tree(s, parts)
             tree, when, partial = s["cur"], s["cur_ts"], s["cur_partial"]
-        threading.Thread(target=save_snapshot, args=(vid, tree, when, partial), daemon=True).start()
+        threading.Thread(target=core.save_snapshot, args=(vid, tree, when, partial), daemon=True).start()
         return {"ok": True}
 
+    def api_ignore(self, b):
+        vid, parts, on = b["drive"], b.get("path") or [], bool(b.get("on", True))
+        st = core.load_settings()
+        lst = st["ignore"].setdefault(vid, [])
+        key = "/".join(parts)
+        if on and key and key not in lst:
+            lst.append(key)
+        if not on and key in lst:
+            lst.remove(key)
+        if not lst:
+            st["ignore"].pop(vid, None)
+        core.save_settings(st)
+        drive_state(vid)["cache"] = {}
+        return {"ignore": st["ignore"]}
+
+    def api_watch(self, b):
+        vid, parts, gb = b["drive"], b.get("path") or [], float(b.get("gb") or 0)
+        st = core.load_settings()
+        st["watch"] = [w for w in st["watch"] if not (w["vol"] == vid and w["path"] == parts)]
+        if gb > 0:
+            st["watch"].append({"vol": vid, "path": parts, "gb": gb, "name": parts[-1] if parts else vol(vid)["name"]})
+        core.save_settings(st)
+        return {"watch": st["watch"]}
+
+    # ---------------------------------------------------------- staging area
+    def api_stage_list(self, b):
+        items = core.read_staged()
+        return {"items": items, "total": sum(i["size"] for i in items)}
+
+    def api_stage_add(self, b):
+        if b.get("abs"):
+            added = stage_from_abs(b["abs"])
+        else:
+            added = staged_add([dict(it, vol=b.get("drive") or it.get("vol")) for it in b.get("items", [])])
+        return dict(self.api_stage_list({}), added=added)
+
+    def api_stage_remove(self, b):
+        items = [x for x in core.read_staged() if not (x["vol"] == b["vol"] and x["path"] == b["path"])]
+        core.write_staged(items)
+        return self.api_stage_list({})
+
+    def api_stage_clear(self, b):
+        core.write_staged([])
+        return self.api_stage_list({})
+
+    def api_stage_trash(self, b):
+        r = staged_trash()
+        return dict(r, **self.api_stage_list({}))
+
+    # ---------------------------------------------------------- cleanup suggestions
+    def api_cleanup_start(self, b):
+        j = JOB["cleanup"]
+        if j and j["running"]:
+            return {"ok": True}
+        volumes()
+        JOB["cleanup"] = cleanup.start(current_trees())
+        return {"ok": True}
+
+    def api_cleanup_status(self, b):
+        j = JOB["cleanup"]
+        if not j:
+            return {"running": False, "items": []}
+        return {"running": j["running"], "items": j["items"]}
+
+    def api_cleanup_run(self, b):
+        r = cleanup.run(b["id"])
+        j = JOB["cleanup"]
+        if j and r.get("ok") and not r.get("launched"):
+            for i, it in enumerate(j["items"]):
+                if it["id"] == b["id"]:
+                    j["items"][i] = dict(it, size=max(0, (it.get("size") or 0) - r.get("freed", 0)), done=True)
+        return r
+
+    # ---------------------------------------------------------- duplicates
+    def api_dupes_start(self, b):
+        vid = b["drive"]
+        j = JOB["dupes"]
+        if j and j["running"]:
+            j["cancel"] = True
+        s = drive_state(vid)
+        parts = b.get("path") or []
+        node, _ = walk(s["cur"], parts)
+        if node is None:
+            return {"error": "Scan this disk first."}
+        min_size = int(float(b.get("minMB") or 10) * (1 << 20))
+        root = vol(vid)["root"]
+        files = [{"path": os.path.join(root, *pp), "p": list(pp), "size": sz, "m": mt, "c": c}
+                 for sz, pp, c, mt in iter_files(node, parts, core.ignored(core.load_settings(), vid)) if sz >= min_size]
+        JOB["dupes"] = dupes.start(files)
+        JOB["dupes"]["vol"] = vid
+        return {"ok": True, "candidates": len(files)}
+
+    def api_dupes_status(self, b):
+        j = JOB["dupes"]
+        if not j:
+            return {"running": False, "groups": None}
+        return {k: j[k] for k in ("running", "phase", "done", "total", "groups", "cancelled", "error", "candidates", "vol")}
+
+    def api_dupes_cancel(self, b):
+        if JOB["dupes"]:
+            JOB["dupes"]["cancel"] = True
+        return {}
+
+    # ---------------------------------------------------------- apps
+    def _apps(self):
+        if time.time() - APPS_CACHE["t"] > 120:
+            volumes()
+            items = plat.installed_apps()
+            for a in items:
+                size = None
+                if a.get("location"):
+                    _vid, _parts, node = locate(a["location"])
+                    if isinstance(node, Node):
+                        size = node.size
+                    elif isinstance(node, tuple):
+                        size = node[1]
+                a["size"] = size if size is not None else (a.get("estimate") or None)
+                a["sizeFrom"] = "scan" if size is not None else ("estimate" if a.get("estimate") else "")
+            items.sort(key=lambda a: -(a["size"] or 0))
+            APPS_CACHE.update(t=time.time(), items=items)
+        return APPS_CACHE["items"]
+
+    def api_apps(self, b):
+        if b.get("refresh"):
+            APPS_CACHE["t"] = 0
+        return {"items": [{k: v for k, v in a.items() if k != "cmd" or a["uninstall"] == "command"} for a in self._apps()],
+                "os": plat.NAME}
+
+    def api_app_related(self, b):
+        app = next((a for a in self._apps() if a["id"] == b["id"]), None)
+        if app is None:
+            return {"items": []}
+
+        def children(path):
+            _vid, _parts, node = locate(path)
+            if isinstance(node, Node):
+                out = [(d.name, d.size, os.path.join(path, d.name), True) for d in node.dirs]
+                out += [(f[0], f[1], os.path.join(path, f[0]), False) for f in node.files]
+                return out
+            try:      # not in a scan: list it live (sizes measured below for matches only)
+                return [(e.name, 0, e.path, e.is_dir()) for e in os.scandir(path) if not e.is_symlink()]
+            except OSError:
+                return []
+        items = appsmod.related(app, children)
+        for it in items:
+            if not it["size"]:
+                it["size"] = cleanup.du(it["path"])[0]
+        return {"items": items}
+
+    def api_app_uninstall(self, b):
+        app = next((a for a in self._apps() if a["id"] == b["id"]), None)
+        if app is None:
+            return {"error": "That app isn't installed anymore."}
+        if app["uninstall"] == "trash":
+            added = stage_from_abs([{"path": app["location"], "name": app["name"] + ".app",
+                                     "size": app.get("size") or 0, "kind": "d", "c": 2}])
+            return {"ok": True, "staged": added}
+        ok, err = plat.run_uninstall(app)
+        APPS_CACHE["t"] = 0
+        return {"ok": ok, "error": err}
+
+    # ---------------------------------------------------------- export
+    def api_export_csv(self, b):
+        folder = os.environ.get("HOARD_EXPORT_DIR") or plat.downloads_dir()
+        base = re.sub(r"[^\w .-]", "", b.get("name") or "Hoard export")[:80]
+        path = reports.write_csv(reports.unique_path(folder, f"{base} {time.strftime('%Y-%m-%d %H%M')}", "csv"),
+                                 b["columns"], b["rows"])
+        if not os.environ.get("HOARD_EXPORT_DIR"):
+            plat.reveal(path)
+        return {"file": path}
+
+    def api_export_report(self, b):
+        vid = b["drive"]
+        s = drive_state(vid)
+        if s["cur"] is None:
+            return {"error": "Scan this disk first."}
+        with LOCK:
+            ch = all_changes(s)
+        path = save_report(vid, vol(vid), s["cur"], s["cur_ts"], s["prev"], s["prev_ts"], ch,
+                           os.environ.get("HOARD_EXPORT_DIR") or plat.downloads_dir(), tuple(b.get("path") or []))
+        if not os.environ.get("HOARD_EXPORT_DIR"):
+            plat.reveal(path)
+        return {"file": path}
+
+    # ---------------------------------------------------------- settings
     def api_settings(self, b):
-        return {"settings": load_settings(), "schedule": plat.schedule_status(),
-                "scheduleNote": plat.SCHEDULE_NOTE, "storage": storage_bytes(),
-                "report": read_report()[-12:][::-1]}
+        st = core.load_settings()
+        return {"settings": st, "schedule": plat.schedule_status(),
+                "scheduleNote": plat.SCHEDULE_NOTE, "storage": core.storage_bytes(),
+                "report": core.read_report()[-12:][::-1],
+                "defaultReportDir": os.path.join(plat.documents_dir(), "Hoard reports")}
 
     def api_save_settings(self, b):
-        cur = load_settings()
+        cur = core.load_settings()
         new = b.get("settings") or {}
         sch = new.get("schedule") or {}
         t = str(sch.get("time", cur["schedule"]["time"]))
@@ -832,18 +1068,39 @@ class Handler(BaseHTTPRequestHandler):
         cur["keep"] = max(2, min(365, int(new.get("keep", cur["keep"]))))
         cur["notifyGB"] = max(0.0, float(new.get("notifyGB", cur["notifyGB"])))
         cur["theme"] = new.get("theme") if new.get("theme") in ("system", "light", "dark") else cur["theme"]
+        if "ignore" in new and isinstance(new["ignore"], dict):
+            cur["ignore"] = {k: [str(p) for p in v] for k, v in new["ignore"].items() if v}
+        if "watch" in new and isinstance(new["watch"], list):
+            cur["watch"] = [w for w in new["watch"] if isinstance(w, dict) and float(w.get("gb", 0)) > 0]
+        if "reportDir" in new:
+            rd = str(new["reportDir"] or "")
+            if rd:
+                try:
+                    os.makedirs(rd, exist_ok=True)
+                except OSError as ex:
+                    return {"error": f"Can't use that report folder: {ex.strerror or ex}"}
+            cur["reportDir"] = rd
         if cur["schedule"]["enabled"] and not cur["schedule"]["volumes"]:
             return {"error": "Choose at least one disk to scan."}
-        save_settings(cur)
+        core.save_settings(cur)
         err = None
         h, m = (int(x) for x in t.split(":"))
         if cur["schedule"]["enabled"]:
             ok, err = plat.schedule_install(h, m, plat.self_command() + ["--scan"])
         else:
             ok, err = plat.schedule_remove()
-        for vid in os.listdir(SCANS_DIR) if os.path.isdir(SCANS_DIR) else []:
-            prune(vid, cur["keep"])
+        for vid in os.listdir(core.SCANS_DIR) if os.path.isdir(core.SCANS_DIR) else []:
+            core.prune(vid, cur["keep"])
+        for s in STATE.values():
+            s["cache"] = {}
         return {"ok": ok, "error": err, "settings": cur, "schedule": plat.schedule_status()}
+
+    def api_open_folder(self, b):
+        p = b.get("which") == "reports" and core.load_settings().get("reportDir")
+        if p and os.path.isdir(p):
+            plat.open_default(p)
+            return {"ok": True}
+        return {"error": "That folder doesn't exist yet."}
 
 
 def watchdog():
@@ -856,7 +1113,8 @@ def watchdog():
 
 
 def main(open_window=True, port=0):
-    migrate_v1()
+    core.migrate_v1()
+    threading.Thread(target=core.warm_indexes, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     if sys.stdout:

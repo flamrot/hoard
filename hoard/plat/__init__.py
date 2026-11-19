@@ -38,6 +38,52 @@ schedule_remove = _os.schedule_remove      # () -> (ok, error)
 schedule_status = _os.schedule_status      # () -> {"installed": bool, "how": str}
 SCHEDULE_NOTE = _os.SCHEDULE_NOTE
 notify = _os.notify                        # (title, body) -> None, best effort
+bin_size = _os.bin_size                    # () -> bytes in the Recycle Bin / Trash, or None
+empty_bin = _os.empty_bin                  # () -> (ok, error)
+cleanup_specs = _os.cleanup_specs          # () -> [cleanup target dicts], see cleanup.py
+installed_apps = _os.installed_apps        # () -> [app dicts], see apps.py
+run_uninstall = _os.run_uninstall          # (app) -> (ok, error)
+HIDDEN_NOTE = _os.HIDDEN_NOTE              # why "used" space can exceed what the scan sees
+
+
+def _known_folder(guid_hex, xdg_name, fallback):
+    if NAME == "windows":
+        try:
+            import ctypes
+            buf = ctypes.c_wchar_p()
+            guid = (ctypes.c_byte * 16).from_buffer_copy(bytes.fromhex(guid_hex))
+            if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(buf)) == 0:
+                path = buf.value
+                ctypes.windll.ole32.CoTaskMemFree(buf)
+                return path
+        except Exception:  # noqa: BLE001
+            pass
+    if NAME == "linux":
+        try:
+            r = subprocess.run(["xdg-user-dir", xdg_name], capture_output=True, text=True, env=host_env())
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except OSError:
+            pass
+    return os.path.join(os.path.expanduser("~"), fallback)
+
+
+def downloads_dir():
+    return _known_folder("90e24d373f126545916439c4925e467b", "DOWNLOAD", "Downloads")    # FOLDERID_Downloads
+
+
+def documents_dir():
+    return _known_folder("d09ad3fd8f23af46adb46c85480369c7", "DOCUMENTS", "Documents")   # FOLDERID_Documents
+
+
+def open_default(path):
+    """Open a file with its default app."""
+    if NAME == "windows":
+        os.startfile(path)
+    elif NAME == "macos":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=host_env())
 
 
 def self_command():

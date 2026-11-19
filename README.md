@@ -28,6 +28,13 @@ The app only listens on `127.0.0.1` and every request needs a per-launch token. 
 - A running scan can be **hidden**: it continues in the header while you keep using the map.
 - **Settings** (gear icon): scan chosen disks automatically every day at a set time, get a notification when a disk grows by more than a set amount, choose how many scans to keep, and pick light/dark/system appearance.
 - Every scan is kept (up to your limit). Use the **vs** picker in the toolbar to compare with any earlier scan.
+- **Staging area**: drag blocks onto **Staged** (or press **S**) to collect things to remove, review the list and total, then move them all to the Recycle Bin/Trash in one go.
+- **Clean up** (key 2): measures caches, temp files, crash dumps, shader caches, browser caches, package-manager caches, the Recycle Bin, old installers in Downloads and `node_modules` in inactive projects. Caches are cleared directly; your own files are only ever staged.
+- **Duplicates** (key 3): finds files with identical contents (size → sampled bytes → full hash) in the folder open on the map; stage every extra copy keeping the newest or oldest.
+- **Apps** (key 4): installed apps by size, an Uninstall button (the app's own uninstaller on Windows, Trash on macOS, the command on Linux), and **Related folders** to find what an app leaves behind.
+- **Search** (Ctrl+F) with filters for kind, size, type, extension and "not changed for…"; a **Types** tab totals space by file extension.
+- **Age view**: color the map by when files were last modified to spot things untouched for a year or more.
+- **Growth chart** for any folder across saved scans, **size alerts** per folder, an **ignore list**, **quick preview** (Space) for images, video, audio and text, and **export** of any list as CSV or the folder as an HTML report.
 
 ### Daily scans
 The daily scan is registered with the operating system, so it runs even when Hoard is closed:

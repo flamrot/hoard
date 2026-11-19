@@ -167,6 +167,136 @@ def notify(title, body):
         pass
 
 
+HIDDEN_NOTE = ("Space Windows uses but the scan can't open: system restore points, the file table, "
+               "protected system folders and files in use. Windows' Disk Cleanup can reclaim some of it.")
+
+
+class SHQUERYRBINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("i64Size", ctypes.c_longlong), ("i64NumItems", ctypes.c_longlong)]
+
+
+def bin_size():
+    info = SHQUERYRBINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if ctypes.windll.shell32.SHQueryRecycleBinW(None, ctypes.byref(info)) == 0:
+        return info.i64Size
+    return None
+
+
+def empty_bin():
+    SHERB_NOCONFIRMATION, SHERB_NOSOUND = 0x1, 0x4
+    r = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, SHERB_NOCONFIRMATION | SHERB_NOSOUND)
+    # S_OK, or E_UNEXPECTED (0x8000FFFF) when it was already empty
+    return (True, None) if r in (0, -2147418113) else (False, f"Windows couldn't empty the Recycle Bin (code {r & 0xFFFFFFFF:#x}).")
+
+
+def cleanup_specs():
+    L = os.environ.get("LOCALAPPDATA", "")
+    H = os.path.expanduser("~")
+    T = os.environ.get("TEMP") or os.path.join(L, "Temp")
+    sysdrive = os.environ.get("SystemDrive", "C:") + "\\"
+    chromium = []
+    for base in ("Google/Chrome", "Microsoft/Edge", "BraveSoftware/Brave-Browser", "Vivaldi"):
+        for sub in ("Cache", "Code Cache", "GPUCache", "Service Worker/CacheStorage"):
+            chromium.append(f"{L}/{base}/User Data/*/{sub}")
+    return [
+        {"id": "bin", "group": "Recycle Bin", "title": "Recycle Bin",
+         "desc": "Things you've already deleted. Emptying it frees the space for good.", "action": "empty_bin"},
+        {"id": "temp", "group": "System", "title": "Temporary files",
+         "desc": "Leftovers in your temp folder older than a day. Files in use are skipped.",
+         "action": "clear", "paths": [T], "olderDays": 1},
+        {"id": "crash", "group": "System", "title": "Crash dumps and error reports",
+         "desc": "Memory dumps and reports saved when apps crashed.", "action": "clear",
+         "paths": [f"{L}/CrashDumps", f"{L}/Microsoft/Windows/WER"]},
+        {"id": "shader", "group": "System", "title": "Graphics shader caches",
+         "desc": "AMD, NVIDIA and DirectX shader caches. Games rebuild them, so the first launch may stutter a little.",
+         "action": "clear", "paths": [f"{L}/AMD/DxCache", f"{L}/AMD/DxcCache", f"{L}/AMD/GLCache", f"{L}/AMD/VkCache",
+                                      f"{L}/NVIDIA/DXCache", f"{L}/NVIDIA/GLCache", f"{L}/D3DSCache"]},
+        {"id": "browsers", "group": "Browsers", "title": "Browser caches",
+         "desc": "Cached pages and images for Chrome, Edge, Brave, Vivaldi and Firefox. You stay signed in; close the browser first for the best result.",
+         "action": "clear", "paths": chromium + [f"{L}/Mozilla/Firefox/Profiles/*/cache2"]},
+        {"id": "npm", "group": "Developer", "title": "npm cache", "desc": "Downloaded packages; npm fetches them again when needed.",
+         "action": "clear", "paths": [f"{L}/npm-cache/_cacache"]},
+        {"id": "pip", "group": "Developer", "title": "pip and uv caches", "desc": "Downloaded Python packages.",
+         "action": "clear", "paths": [f"{L}/pip/cache", f"{L}/uv/cache"]},
+        {"id": "yarn", "group": "Developer", "title": "Yarn, Go, Gradle and Cargo caches",
+         "desc": "Build and package caches; rebuilt on the next build.", "action": "clear",
+         "paths": [f"{L}/Yarn/Cache", f"{L}/go-build", f"{H}/.gradle/caches", f"{H}/.cargo/registry/cache"]},
+        {"id": "nuget", "group": "Developer", "title": "NuGet packages", "desc": "Downloaded .NET packages; restored on the next build.",
+         "action": "clear", "paths": [f"{H}/.nuget/packages"], "review": True},
+        {"id": "hf", "group": "Developer", "title": "Downloaded AI models (Hugging Face)",
+         "desc": "Models cached by Python AI tools. Pick the ones you no longer use.", "action": "stage_children",
+         "paths": [f"{H}/.cache/huggingface/hub"]},
+        {"id": "node_modules", "group": "Your files", "title": "node_modules in inactive projects",
+         "desc": "Projects you haven't changed for 90 days. Run npm install to get them back.", "action": "stage_files",
+         "finder": "node_modules"},
+        {"id": "downloads", "group": "Your files", "title": "Old installers and archives in Downloads",
+         "desc": "Setup files, disk images and archives older than 30 days.", "action": "stage_files", "finder": "downloads"},
+        {"id": "winclean", "group": "System", "title": "Windows Update and system files",
+         "desc": "Old Windows Update downloads, Delivery Optimization files and upgrade leftovers. Windows' own Disk Cleanup removes these.",
+         "action": "tool", "tool": ["cleanmgr.exe", "/d", sysdrive[0]],
+         "paths": [os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "SoftwareDistribution", "Download")]},
+        {"id": "hiber", "group": "System", "title": "Hibernation file",
+         "desc": "Reserved for hibernate and Fast Startup. If you never hibernate, you can turn it off in an admin terminal.",
+         "action": "command", "command": "powercfg /h off", "admin": True, "file": sysdrive + "hiberfil.sys"},
+    ]
+
+
+def installed_apps():
+    import hashlib
+    import winreg
+    roots = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+             (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall")]
+    out, seen = [], set()
+    for hive, path in roots:
+        try:
+            k = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        for i in range(winreg.QueryInfoKey(k)[0]):
+            try:
+                sub = winreg.EnumKey(k, i)
+                sk = winreg.OpenKey(k, sub)
+            except OSError:
+                continue
+
+            def v(n, sk=sk):
+                try:
+                    return winreg.QueryValueEx(sk, n)[0]
+                except OSError:
+                    return None
+            name, un = v("DisplayName"), v("UninstallString")
+            if not name or not un or v("SystemComponent") == 1 or v("ParentKeyName") \
+                    or v("ReleaseType") in ("Update", "Hotfix", "Security Update"):
+                continue
+            key = (name.strip().lower(), v("DisplayVersion"))
+            if key in seen:
+                continue
+            seen.add(key)
+            loc = (v("InstallLocation") or "").strip().strip('"')
+            if not loc and v("DisplayIcon"):
+                icon = str(v("DisplayIcon")).split(",")[0].strip().strip('"')
+                loc = os.path.dirname(icon) if icon.lower().endswith(".exe") else ""
+            out.append({"id": hashlib.sha1(f"{hive}{path}{sub}".encode()).hexdigest()[:12],
+                        "name": name.strip(), "version": v("DisplayVersion") or "", "publisher": v("Publisher") or "",
+                        "location": loc if loc and os.path.isdir(loc) else "",
+                        "estimate": int(v("EstimatedSize") or 0) * 1024, "date": str(v("InstallDate") or ""),
+                        "uninstall": "run", "cmd": str(un)})
+    return out
+
+
+def run_uninstall(app):
+    cmd = app["cmd"]
+    if "msiexec" in cmd.lower():
+        cmd = cmd.replace("/I{", "/X{").replace("/i{", "/X{")     # "modify" entries -> uninstall
+    try:
+        subprocess.Popen(cmd, shell=True)
+        return True, None
+    except OSError as ex:
+        return False, str(ex)
+
+
 def app_browsers():
     cands = [
         os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft\\Edge\\Application\\msedge.exe"),

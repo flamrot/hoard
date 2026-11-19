@@ -147,6 +147,93 @@ def notify(title, body):
         pass
 
 
+HIDDEN_NOTE = ("Space macOS reports as used but the scan can't see: purgeable space, local Time Machine "
+               "snapshots, the system volume and folders Hoard isn't allowed to read (give it Full Disk Access).")
+
+
+def _du(path):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def bin_size():
+    return _du(os.path.expanduser("~/.Trash"))
+
+
+def empty_bin():
+    r = subprocess.run(["osascript", "-e", 'tell application "Finder" to empty trash'], capture_output=True, text=True)
+    return (True, None) if r.returncode == 0 else (False, r.stderr.strip() or "Finder couldn't empty the Trash.")
+
+
+def cleanup_specs():
+    H = os.path.expanduser("~")
+    return [
+        {"id": "bin", "group": "Trash", "title": "Trash", "desc": "Things you've already deleted. Emptying it frees the space for good.",
+         "action": "empty_bin"},
+        {"id": "caches", "group": "System", "title": "App caches", "desc": "Caches in your Library folder. Apps rebuild them as needed.",
+         "action": "clear", "paths": [f"{H}/Library/Caches/*"], "review": True},
+        {"id": "logs", "group": "System", "title": "Old logs", "desc": "App logs older than a week.",
+         "action": "clear", "paths": [f"{H}/Library/Logs"], "olderDays": 7},
+        {"id": "xcode", "group": "Developer", "title": "Xcode build data", "desc": "DerivedData and simulator caches; rebuilt on the next build.",
+         "action": "clear", "paths": [f"{H}/Library/Developer/Xcode/DerivedData", f"{H}/Library/Developer/CoreSimulator/Caches"]},
+        {"id": "devicesupport", "group": "Developer", "title": "Old iOS device support files", "desc": "One folder per iOS version you've connected.",
+         "action": "stage_children", "paths": [f"{H}/Library/Developer/Xcode/iOS DeviceSupport"]},
+        {"id": "npm", "group": "Developer", "title": "npm, pip and uv caches", "desc": "Downloaded packages; fetched again when needed.",
+         "action": "clear", "paths": [f"{H}/.npm/_cacache", f"{H}/.cache/uv", f"{H}/.cache/pip"]},
+        {"id": "gradle", "group": "Developer", "title": "Gradle and Cargo caches", "desc": "Rebuilt on the next build.",
+         "action": "clear", "paths": [f"{H}/.gradle/caches", f"{H}/.cargo/registry/cache"]},
+        {"id": "hf", "group": "Developer", "title": "Downloaded AI models (Hugging Face)", "desc": "Pick the models you no longer use.",
+         "action": "stage_children", "paths": [f"{H}/.cache/huggingface/hub"]},
+        {"id": "brew", "group": "Developer", "title": "Homebrew downloads", "desc": "Old package downloads. Run this in Terminal.",
+         "action": "command", "command": "brew cleanup --prune=all", "paths": [f"{H}/Library/Caches/Homebrew"]},
+        {"id": "node_modules", "group": "Your files", "title": "node_modules in inactive projects",
+         "desc": "Projects you haven't changed for 90 days. Run npm install to get them back.", "action": "stage_files", "finder": "node_modules"},
+        {"id": "downloads", "group": "Your files", "title": "Old installers and archives in Downloads",
+         "desc": "Disk images, installers and archives older than 30 days.", "action": "stage_files", "finder": "downloads"},
+        {"id": "snapshots", "group": "System", "title": "Local Time Machine snapshots",
+         "desc": "macOS frees these automatically when space runs low. To remove them now, run this in Terminal.",
+         "action": "command", "command": "tmutil thinlocalsnapshots / 999999999999 4", "admin": False},
+    ]
+
+
+def installed_apps():
+    import hashlib
+    import plistlib
+    out = []
+    for base in ("/Applications", os.path.expanduser("~/Applications")):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for n in names:
+            if not n.endswith(".app"):
+                continue
+            p = os.path.join(base, n)
+            info = {}
+            try:
+                with open(os.path.join(p, "Contents", "Info.plist"), "rb") as f:
+                    info = plistlib.load(f)
+            except Exception:  # noqa: BLE001
+                pass
+            if info.get("CFBundleIdentifier", "").startswith("com.apple."):
+                continue
+            out.append({"id": hashlib.sha1(p.encode()).hexdigest()[:12], "name": n[:-4],
+                        "version": str(info.get("CFBundleShortVersionString", "")), "publisher": "",
+                        "bundle": info.get("CFBundleIdentifier", ""), "location": p, "estimate": 0, "date": "",
+                        "uninstall": "trash", "cmd": ""})
+    return out
+
+
+def run_uninstall(app):
+    return False, "Move the app to the Trash from Hoard's staging area."
+
+
 def app_browsers():
     cands = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
              "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",

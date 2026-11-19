@@ -250,6 +250,113 @@ def notify(title, body):
             pass
 
 
+HIDDEN_NOTE = ("Space the system reports as used but the scan can't see: other users' files, root-only "
+               "folders, reserved filesystem blocks and space held by deleted-but-open files.")
+
+
+def _du(path):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def _trash_dir():
+    return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "Trash")
+
+
+def bin_size():
+    return _du(_trash_dir())
+
+
+def empty_bin():
+    if shutil.which("gio"):
+        r = subprocess.run(["gio", "trash", "--empty"], capture_output=True, text=True, env=_env())
+        if r.returncode == 0:
+            return True, None
+    for sub in ("files", "info", "expunged"):
+        d = os.path.join(_trash_dir(), sub)
+        if not os.path.isdir(d):
+            continue
+        for n in os.listdir(d):
+            p = os.path.join(d, n)
+            try:
+                shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
+            except OSError:
+                pass
+    return True, None
+
+
+def cleanup_specs():
+    H = os.path.expanduser("~")
+    C = os.environ.get("XDG_CACHE_HOME") or f"{H}/.cache"
+    return [
+        {"id": "bin", "group": "Trash", "title": "Trash", "desc": "Things you've already deleted. Emptying it frees the space for good.",
+         "action": "empty_bin"},
+        {"id": "thumbs", "group": "System", "title": "Thumbnail cache", "desc": "Picture previews; rebuilt as you browse.",
+         "action": "clear", "paths": [f"{C}/thumbnails"]},
+        {"id": "browsers", "group": "Browsers", "title": "Browser caches", "desc": "Cached pages and images. You stay signed in.",
+         "action": "clear", "paths": [f"{C}/google-chrome", f"{C}/chromium", f"{C}/BraveSoftware", f"{C}/microsoft-edge",
+                                      f"{C}/mozilla/firefox/*/cache2"]},
+        {"id": "npm", "group": "Developer", "title": "npm, pip, uv and Yarn caches", "desc": "Downloaded packages; fetched again when needed.",
+         "action": "clear", "paths": [f"{H}/.npm/_cacache", f"{C}/pip", f"{C}/uv", f"{C}/yarn"]},
+        {"id": "gradle", "group": "Developer", "title": "Go, Gradle and Cargo caches", "desc": "Rebuilt on the next build.",
+         "action": "clear", "paths": [f"{C}/go-build", f"{H}/.gradle/caches", f"{H}/.cargo/registry/cache"]},
+        {"id": "hf", "group": "Developer", "title": "Downloaded AI models (Hugging Face)", "desc": "Pick the models you no longer use.",
+         "action": "stage_children", "paths": [f"{C}/huggingface/hub"]},
+        {"id": "node_modules", "group": "Your files", "title": "node_modules in inactive projects",
+         "desc": "Projects you haven't changed for 90 days. Run npm install to get them back.", "action": "stage_files", "finder": "node_modules"},
+        {"id": "downloads", "group": "Your files", "title": "Old installers and archives in Downloads",
+         "desc": "Packages, disk images and archives older than 30 days.", "action": "stage_files", "finder": "downloads"},
+        {"id": "journal", "group": "System", "title": "System journal logs", "desc": "Keeps the newest 200 MB of logs.",
+         "action": "command", "command": "sudo journalctl --vacuum-size=200M", "admin": True, "paths": ["/var/log/journal"]},
+        {"id": "apt", "group": "System", "title": "Package download cache", "desc": "Downloaded .deb files that are already installed.",
+         "action": "command", "command": "sudo apt clean", "admin": True, "paths": ["/var/cache/apt/archives"]},
+        {"id": "flatpak", "group": "System", "title": "Unused Flatpak runtimes", "desc": "Runtimes no installed app needs anymore.",
+         "action": "command", "command": "flatpak uninstall --unused", "admin": False},
+    ]
+
+
+def installed_apps():
+    import hashlib
+    out = []
+    if shutil.which("dpkg-query"):
+        r = subprocess.run(["dpkg-query", "-W", "-f=${Package}\t${Installed-Size}\t${Version}\t${Status}\n"],
+                           capture_output=True, text=True, env=_env())
+        for line in r.stdout.splitlines():
+            p = line.split("\t")
+            if len(p) == 4 and p[3].endswith("installed") and p[1].isdigit() and int(p[1]) >= 20 * 1024:
+                out.append({"id": hashlib.sha1(("deb" + p[0]).encode()).hexdigest()[:12], "name": p[0], "version": p[2],
+                            "publisher": "apt", "location": "", "estimate": int(p[1]) * 1024, "date": "",
+                            "uninstall": "command", "cmd": f"sudo apt remove {p[0]}"})
+    if shutil.which("flatpak"):
+        r = subprocess.run(["flatpak", "list", "--app", "--columns=application,name,version,size"],
+                           capture_output=True, text=True, env=_env())
+        for line in r.stdout.splitlines():
+            p = line.split("\t")
+            if len(p) >= 2:
+                out.append({"id": hashlib.sha1(("fp" + p[0]).encode()).hexdigest()[:12], "name": p[1] or p[0],
+                            "version": p[2] if len(p) > 2 else "", "publisher": "Flatpak", "location": "",
+                            "estimate": 0, "date": "", "uninstall": "command", "cmd": f"flatpak uninstall {p[0]}"})
+    if shutil.which("snap"):
+        r = subprocess.run(["snap", "list"], capture_output=True, text=True, env=_env())
+        for line in r.stdout.splitlines()[1:]:
+            p = line.split()
+            if p:
+                out.append({"id": hashlib.sha1(("snap" + p[0]).encode()).hexdigest()[:12], "name": p[0],
+                            "version": p[1] if len(p) > 1 else "", "publisher": "Snap", "location": "",
+                            "estimate": 0, "date": "", "uninstall": "command", "cmd": f"sudo snap remove {p[0]}"})
+    return out
+
+
+def run_uninstall(app):
+    return False, "Run the command shown in a terminal."
+
+
 def app_browsers():
     from . import which_all
     return which_all(["google-chrome", "google-chrome-stable", "chromium", "chromium-browser",

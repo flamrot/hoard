@@ -57,9 +57,14 @@ def main():
     write(os.path.join(target, "sub", "clip.mp4"), 2 * MB)
     write(os.path.join(target, "sub", "notes.txt"), 2000)
     write(os.path.join(target, "models", "model.safetensors"), int(1.5 * MB))
+    os.makedirs(os.path.join(target, "copies"), exist_ok=True)
+    shutil.copyfile(os.path.join(target, "sub", "clip.mp4"), os.path.join(target, "copies", "clip copy.mp4"))
+    old = time.time() - 400 * 86400                      # one file "not touched in over a year"
+    os.utime(os.path.join(target, "models", "model.safetensors"), (old, old))
+    exports = os.path.join(tmp, "exports")
 
     port = free_port()
-    env = dict(os.environ, HOARD_SCAN_DIR=target, HOARD_DATA_DIR=data)
+    env = dict(os.environ, HOARD_SCAN_DIR=target, HOARD_DATA_DIR=data, HOARD_EXPORT_DIR=exports)
     proc = subprocess.Popen(args + ["--no-window", "--port", str(port)], env=env)
     base = f"http://127.0.0.1:{port}"
     try:
@@ -105,12 +110,74 @@ def main():
 
         p = scan(vid)
         print(f"scan 1: {p['files']} files, {p['bytes'] / MB:.1f} MB")
-        if p["files"] != 4:
-            fail(f"expected 4 files, saw {p['files']}")
+        if p["files"] != 5:
+            fail(f"expected 5 files, saw {p['files']}")
         v = api("view", {"drive": vid, "path": []})["view"]
         names = {c["n"] for c in v.get("ch", [])}
         if not {"sub", "models"} <= names:
             fail(f"unexpected children: {names}")
+
+        # search, types, ages, growth index
+        hits = api("search", {"drive": vid, "path": [], "q": "clip"})["items"]
+        if sorted(h["p"][-1] for h in hits) != ["clip copy.mp4", "clip.mp4"]:
+            fail(f"search for 'clip' found {[h['p'] for h in hits]}")
+        old_hits = api("search", {"drive": vid, "path": [], "olderDays": 365, "kind": "file"})["items"]
+        if [h["p"][-1] for h in old_hits] != ["model.safetensors"]:
+            fail(f"'not changed for a year' found {[h['p'] for h in old_hits]}")
+        types = {t["ext"]: t for t in api("types", {"drive": vid, "path": []})["items"]}
+        if types.get("mp4", {}).get("n") != 2:
+            fail(f"types: {types}")
+        ages = api("ages", {"drive": vid, "path": []})["hist"]
+        if ages[4] < MB or ages[0] < 5 * MB:
+            fail(f"age histogram looks wrong: {ages}")
+        if len(api("trend", {"drive": vid, "path": ["sub"]})["points"]) != 1:
+            fail("trend should have one point after one scan")
+        print("search, types, ages, trend: ok")
+
+        # preview streaming with a byte range
+        req = urllib.request.Request(f"{base}/file?t={token}&v={vid}&p=" + urllib.request.quote(json.dumps(["sub", "clip.mp4"])),
+                                     headers={"Range": "bytes=0-99"})
+        r = urllib.request.urlopen(req, timeout=10)
+        if r.status != 206 or len(r.read()) != 100:
+            fail("preview range request failed")
+
+        # duplicates
+        j = api("dupes_start", {"drive": vid, "path": [], "minMB": 1})
+        for _ in range(120):
+            st = api("dupes_status")
+            if not st["running"]:
+                break
+            time.sleep(0.25)
+        groups = st.get("groups") or []
+        if len(groups) != 1 or sorted(f["p"][-1] for f in groups[0]["files"]) != ["clip copy.mp4", "clip.mp4"]:
+            fail(f"duplicates: {groups}")
+        print(f"duplicates: found {len(groups)} group ({groups[0]['wasted'] / MB:.1f} MB extra)")
+
+        # cleanup suggestions run to completion (measuring only; nothing is cleared)
+        api("cleanup_start")
+        for _ in range(240):
+            cs = api("cleanup_status")
+            if not cs["running"]:
+                break
+            time.sleep(0.25)
+        if cs["running"] or not cs["items"] or any(i.get("pending") for i in cs["items"]):
+            fail("cleanup analysis didn't finish")
+        print(f"cleanup: {len(cs['items'])} suggestions measured")
+
+        # ignore list hides a folder from the view
+        api("ignore", {"drive": vid, "path": ["copies"], "on": True})
+        if "copies" in {c["n"] for c in api("view", {"drive": vid, "path": []})["view"].get("ch", [])}:
+            fail("ignored folder still shown")
+        api("ignore", {"drive": vid, "path": ["copies"], "on": False})
+
+        # export
+        out = api("export_csv", {"name": "smoke", "columns": ["a", "b"], "rows": [["=cmd", 1]]})["file"]
+        with open(out, encoding="utf-8-sig") as f:
+            if "'=cmd" not in f.read():
+                fail("CSV export didn't neutralise a formula")
+        if not os.path.exists(api("export_report", {"drive": vid, "path": []})["file"]):
+            fail("report not written")
+        print("ignore, CSV and HTML export: ok")
         if v["s"] < 6 * MB:
             fail(f"total too small: {v['s']}")
         files = api("files", {"drive": vid, "path": []})["items"]
@@ -148,13 +215,23 @@ def main():
             fail(f"background scan wasn't reported: {rep[:1]}")
         print(f"background scan: saved, picked up, reported (history {len(hist)} scans)")
 
+        # staging area: add, dedupe, remove (and with --trash, move to the Trash)
+        st = api("stage_add", {"drive": vid, "items": [{"path": ["sub", "big.bin"], "size": 3 * MB, "kind": "f", "c": 8},
+                                                       {"path": ["sub"], "size": 5 * MB, "kind": "d", "c": 8}]})
+        if [i["path"] for i in st["items"]] != [["sub"]]:
+            fail(f"staging should keep only the parent folder: {st['items']}")
+        api("stage_clear")
+        api("stage_add", {"drive": vid, "items": [{"path": ["sub", "big.bin"], "size": 3 * MB, "kind": "f", "c": 8}]})
         if do_trash:
-            r = api("recycle", {"drive": vid, "path": ["sub", "big.bin"]})
-            if not r.get("ok"):
-                fail("trash failed: " + str(r.get("error")))
+            r = api("stage_trash")
+            if r.get("done") != 1 or r.get("failed"):
+                fail("staged trash failed: " + str(r.get("failed")))
             if os.path.exists(os.path.join(target, "sub", "big.bin")):
                 fail("file still exists after trash")
-            print("trash: moved sub/big.bin to the", d["trashName"])
+            print("staging + trash: moved sub/big.bin to the", d["trashName"])
+        else:
+            api("stage_clear")
+            print("staging: ok (trash not tested; pass --trash)")
         guard = api("recycle", {"drive": real[0]["id"], "path": []})
         if not guard.get("error"):
             fail("deleting a whole disk must be refused")
