@@ -25,6 +25,7 @@ import core  # noqa: E402
 import cleanup  # noqa: E402
 import dupes  # noqa: E402
 import apps as appsmod  # noqa: E402
+import cloud  # noqa: E402
 import reports  # noqa: E402
 from core import OTHER, Node, dominant, human, list_snaps, walk  # noqa: E402
 
@@ -44,14 +45,31 @@ JOB = {"scan": None, "cleanup": None, "dupes": None}
 VOLS = {}           # vol id -> volume dict from plat.list_volumes()
 
 
+def location_volume(path, name=None):
+    """A folder or network share mapped as its own "disk"."""
+    path = os.path.abspath(path) if not path.startswith(("\\\\", "//")) else path
+    try:
+        u = shutil.disk_usage(path)
+        total, free = u.total, u.free
+    except OSError:
+        total = free = 0
+    net = path.startswith(("\\\\", "//"))
+    return {"id": "dir-" + plat.slug(path), "root": path, "name": name or os.path.basename(path.rstrip("\\/")) or path,
+            "label": "Network share" if net else "Folder", "type": "network" if net else "folder",
+            "total": total, "used": total - free, "free": free, "location": True}
+
+
 def volumes():
     vs = plat.list_volumes()
     extra = os.environ.get("HOARD_SCAN_DIR")   # map one folder as its own "disk" (used by the smoke test)
     if extra and os.path.isdir(extra):
-        extra = os.path.abspath(extra)
-        u = shutil.disk_usage(extra)
-        vs.append({"id": "dir-" + plat.slug(extra), "root": extra, "name": os.path.basename(extra) or extra,
-                   "label": "Folder", "type": "folder", "total": u.total, "used": u.total - u.free, "free": u.free})
+        v = location_volume(extra)
+        v.pop("location")
+        vs.append(v)
+    for loc in core.load_settings().get("locations", []):
+        if os.path.isdir(loc["path"]):
+            vs.append(location_volume(loc["path"], loc.get("name")))
+    vs += cloud.volumes()
     with LOCK:
         VOLS.clear()
         VOLS.update({v["id"]: v for v in vs})
@@ -72,7 +90,53 @@ def vol(vid):
 
 
 def full_path(vid, parts):
-    return os.path.join(vol(vid)["root"], *parts)
+    v = vol(vid)
+    if v["type"] == "cloud":
+        return cloud.remote_path(v, parts)
+    return os.path.join(v["root"], *parts)
+
+
+def is_cloud(vid):
+    return VOLS.get(vid, {}).get("type") == "cloud"
+
+
+def scan_any(v, st):
+    return cloud.scan_remote(v, st) if v["type"] == "cloud" else core.scan_volume(v, st)
+
+
+def fast_available(v):
+    if plat.NAME != "windows":
+        return False
+    import fastscan
+    return fastscan.available(v)
+
+
+def fast_scan(v, st):
+    """NTFS file-table scan through the elevated native helper; falls back to a normal scan if declined."""
+    import fastscan
+    try:
+        return fastscan.scan(v, st)
+    except fastscan.Declined:
+        st.fast = False
+        st.current = "Permission declined, so scanning the normal way…"
+        return scan_any(v, st)
+
+
+def trash_any(vid, parts):
+    """Move one item to the Recycle Bin / Trash (or the cloud's own trash). Returns (ok, error)."""
+    v = vol(vid)
+    if v["type"] == "cloud":
+        if not parts:
+            return False, "That's the whole cloud drive."
+        node, f = walk(drive_state(vid)["cur"], parts) if list_snaps(vid) else (None, None)
+        return cloud.trash(v, parts, is_dir=node is not None and f is None)
+    p = os.path.join(v["root"], *parts)
+    why = plat.protected(v["root"], parts, p)
+    if why:
+        return False, why
+    if not os.path.lexists(p):
+        return True, "gone"
+    return plat.trash(p)
 
 
 def _tree(s, vid, ts):
@@ -117,7 +181,7 @@ def current_trees():
     """(root, tree) for every connected volume that has a scan."""
     out = []
     for vid, v in list(VOLS.items()):
-        if list_snaps(vid):
+        if v["type"] != "cloud" and list_snaps(vid):
             s = drive_state(vid)
             if s["cur"] is not None:
                 out.append((v["root"], s["cur"]))
@@ -128,6 +192,8 @@ def locate(path):
     """(vol id, parts, node or None) for an absolute path inside a scanned volume (longest root wins)."""
     best = None
     for vid, v in VOLS.items():
+        if v["type"] == "cloud":
+            continue
         parts = core.rel_parts(v["root"], path)
         if parts is not None and list_snaps(vid) and (best is None or len(v["root"]) > len(VOLS[best[0]]["root"])):
             best = (vid, parts)
@@ -142,8 +208,8 @@ def run_scan(vid):
     st = JOB["scan"]
     try:
         v = vol(vid)
-        tree = core.scan_volume(v, st)
-        if st.cancel:
+        tree = fast_scan(v, st) if st.fast else scan_any(v, st)
+        if st.cancel or tree is None:
             return
         st.current = "Saving…"
         now = core.new_ts(vid)
@@ -184,7 +250,11 @@ def headless_scan(ids=None):
                 continue
             t0 = time.time()
             st = core.Scan(vid, 0)
-            tree = core.scan_volume(v, st)
+            try:
+                tree = scan_any(v, st)
+            except Exception as ex:  # noqa: BLE001 - e.g. a cloud that's offline; keep going with the rest
+                core.log_error(f"scheduled scan of {vid}", str(ex))
+                continue
             now = core.new_ts(vid)
             before = list_snaps(vid)
             core.save_snapshot(vid, tree, now)
@@ -267,6 +337,8 @@ def is_ignored(parts, ign):
 
 def view_json(node, pn, partial, depth, minb, parts, ign):
     out = {"n": node.name, "s": node.size, "k": "d", "f": node.nfiles, "c": dominant(node.cats), "a": node.age()}
+    if node.cloud:
+        out["cl"] = node.cloud
     if pn is not None:
         out["d"] = node.size - (0 if pn is NEW else pn.size)
     if depth <= 0:
@@ -479,17 +551,12 @@ def staged_trash():
     done, failed, freed, touched = [], [], 0, set()
     for it in items:
         try:
-            v = vol(it["vol"])
-            p = os.path.join(v["root"], *it["path"])
-            why = plat.protected(v["root"], it["path"], p)
-            if why:
-                raise ValueError(why)
-            if not os.path.lexists(p):
-                done.append(it)       # already gone
-                continue
-            ok, err = plat.trash(p)
+            ok, err = trash_any(it["vol"], it["path"])
             if not ok:
                 raise ValueError(err)
+            if err == "gone":
+                done.append(it)       # already gone
+                continue
             done.append(it)
             freed += it["size"]
             if list_snaps(it["vol"]):
@@ -512,6 +579,8 @@ def stage_from_abs(paths):
     for c in paths:
         best = None
         for vid, v in VOLS.items():
+            if v["type"] == "cloud":
+                continue
             parts = core.rel_parts(v["root"], c["path"])
             if parts and (best is None or len(v["root"]) > len(VOLS[best[0]]["root"])):
                 best = (vid, parts)
@@ -566,6 +635,8 @@ class Handler(BaseHTTPRequestHandler):
         if (q.get("t") or [""])[0] != TOKEN:
             return self._send(403, {"error": "bad token"})
         try:
+            if is_cloud(q["v"][0]):
+                raise ValueError("cloud")
             path = full_path(q["v"][0], json.loads(q["p"][0]))
             size = os.path.getsize(path)
         except (KeyError, ValueError, OSError):
@@ -642,7 +713,9 @@ class Handler(BaseHTTPRequestHandler):
         st = core.load_settings()
         return {"drives": volumes(), "os": plat.NAME, "sep": os.sep,
                 "trashName": plat.TRASH_NAME, "revealName": plat.REVEAL_NAME, "theme": st["theme"],
-                "ignore": st["ignore"], "watch": st["watch"], "hiddenNote": plat.HIDDEN_NOTE}
+                "ignore": st["ignore"], "watch": st["watch"], "hiddenNote": plat.HIDDEN_NOTE,
+                "fastScan": st.get("fastScan", False),
+                "fastVols": [v["id"] for v in VOLS.values() if fast_available(v)]}
 
     def api_open_drive(self, b):
         s = drive_state(b["drive"])
@@ -660,9 +733,13 @@ class Handler(BaseHTTPRequestHandler):
             used = u.total - u.free
         except OSError:
             used = 0
-        JOB["scan"] = core.Scan(vid, used)
+        if v["type"] == "cloud":
+            used = v.get("used") or 0
+        job = core.Scan(vid, used)
+        job.fast = bool(b.get("fast")) and fast_available(v)
+        JOB["scan"] = job
         threading.Thread(target=run_scan, args=(vid,), daemon=True).start()
-        return {"ok": True}
+        return {"ok": True, "fast": job.fast}
 
     def api_cancel(self, b):
         j = JOB["scan"]
@@ -676,7 +753,7 @@ class Handler(BaseHTTPRequestHandler):
             return {"running": False}
         return {"running": j.running, "drive": j.drive, "files": j.files, "bytes": j.bytes, "used": j.used,
                 "errors": j.errors, "current": j.current, "elapsed": time.time() - j.started,
-                "cancelled": j.cancel, "error": j.error}
+                "cancelled": j.cancel, "error": j.error, "fast": j.fast, "cloud": j.cloud}
 
     # ---------------------------------------------------------- map and lists
     def api_view(self, b):
@@ -694,7 +771,7 @@ class Handler(BaseHTTPRequestHandler):
             v = view_json(node, pn, s["prev_partial"], int(b.get("depth", 8)), max(1, node.size * 0.0004),
                           tuple(parts), ign)
             v["cats"] = list(node.cats)
-            if not parts and not s["cur_partial"] and VOLS.get(vid, {}).get("type") != "folder":
+            if not parts and not s["cur_partial"] and VOLS.get(vid, {}).get("type") in ("fixed", "removable"):
                 hidden = VOLS[vid]["used"] - node.size
                 if hidden > (1 << 30):
                     v["hidden"] = hidden
@@ -833,6 +910,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------- acting on items
     def api_reveal(self, b):
+        if "drive" in b and is_cloud(b["drive"]):
+            parts = b.get("path") or []
+            url = cloud.web_url(vol(b["drive"]), parts[-1] if parts else "")
+            if not url:
+                return {"error": "There's no web page to open for this cloud."}
+            import webbrowser
+            webbrowser.open(url)
+            return {"ok": True}
         p = full_path(b["drive"], b.get("path") or []) if "drive" in b else b.get("abs", "")
         if not p or not os.path.lexists(p):
             return {"error": "That item no longer exists."}
@@ -840,6 +925,8 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True}
 
     def api_open(self, b):
+        if is_cloud(b["drive"]):
+            return {"error": "Open cloud files from the cloud's website or app."}
         p = full_path(b["drive"], b.get("path") or [])
         if not os.path.lexists(p):
             return {"error": "That item no longer exists."}
@@ -848,21 +935,80 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_recycle(self, b):
         vid, parts = b["drive"], b.get("path") or []
-        p = full_path(vid, parts)
-        why = plat.protected(vol(vid)["root"], parts, p)
-        if why:
-            return {"error": why}
-        if not os.path.lexists(p):
-            return {"error": "That item no longer exists."}
-        ok, err = plat.trash(p)
+        ok, err = trash_any(vid, parts)
         if not ok:
             return {"error": err}
+        if err == "gone":
+            return {"error": "That item no longer exists."}
         s = drive_state(vid)
         with LOCK:
             remove_from_tree(s, parts)
             tree, when, partial = s["cur"], s["cur_ts"], s["cur_partial"]
         threading.Thread(target=core.save_snapshot, args=(vid, tree, when, partial), daemon=True).start()
         return {"ok": True}
+
+    def api_info(self, b):
+        """Owner, attributes and permissions, plus who owns the space in a folder."""
+        vid, parts = b["drive"], b.get("path") or []
+        if is_cloud(vid):
+            return {"cloud": True}
+        p = full_path(vid, parts)
+        if not os.path.lexists(p):
+            return {"error": "That item no longer exists."}
+        info = plat.file_info(p)
+        owners = None
+        s = drive_state(vid)
+        node, f = walk(s["cur"], parts) if s["cur"] is not None else (None, None)
+        if isinstance(node, Node) and f is None and node.dirs:
+            by = {}
+            items = sorted([(d.size, d.name) for d in node.dirs] + [(x[1], x[0]) for x in node.files], reverse=True)[:150]
+            for size, name in items:
+                o = plat.owner_of(os.path.join(p, name))
+                by[o] = by.get(o, 0) + size
+            owners = sorted(({"owner": o, "s": sz} for o, sz in by.items() if sz > 0), key=lambda x: -x["s"])
+        return {"info": info, "owners": owners}
+
+    def api_add_location(self, b):
+        path = (b.get("path") or "").strip().strip('"')
+        if not path:
+            return {"error": "Type or paste a folder path."}
+        path = os.path.expandvars(os.path.expanduser(path))
+        if not os.path.isdir(path):
+            return {"error": "That folder doesn't exist, or Hoard can't open it."}
+        st = core.load_settings()
+        if any(os.path.normcase(l["path"]) == os.path.normcase(path) for l in st["locations"]):
+            return {"error": "That location is already on the list."}
+        st["locations"].append({"path": path, "name": (b.get("name") or "").strip() or None})
+        core.save_settings(st)
+        volumes()
+        return {"ok": True, "id": location_volume(path)["id"]}
+
+    def api_remove_location(self, b):
+        st = core.load_settings()
+        v = VOLS.get(b["drive"])
+        if not v or not v.get("location"):
+            return {"error": "That isn't a location you added."}
+        st["locations"] = [l for l in st["locations"] if os.path.normcase(l["path"]) != os.path.normcase(v["root"])]
+        core.save_settings(st)
+        volumes()
+        return {"ok": True}
+
+    # ---------------------------------------------------------- cloud (rclone)
+    def api_cloud_status(self, b):
+        r = cloud.status()
+        r["fastAvailable"] = plat.NAME == "windows"
+        return r
+
+    def api_cloud_install(self, b):
+        return cloud.install()
+
+    def api_cloud_connect(self, b):
+        name = re.sub(r"[^\w-]", "", b.get("name") or "gdrive") or "gdrive"
+        return cloud.connect_drive(name, bool(b.get("readonly", True)))
+
+    def api_cloud_refresh(self, b):
+        cloud.volumes(force=True)
+        return {"drives": volumes()}
 
     def api_ignore(self, b):
         vid, parts, on = b["drive"], b.get("path") or [], bool(b.get("on", True))
@@ -926,9 +1072,22 @@ class Handler(BaseHTTPRequestHandler):
         j = JOB["cleanup"]
         if not j:
             return {"running": False, "items": []}
-        return {"running": j["running"], "items": j["items"]}
+        items = list(j["items"])
+        for v in VOLS.values():          # cloud trash (Google Drive keeps deleted files and counts them)
+            if v["type"] == "cloud" and v.get("backend") == "drive":
+                items.append({"id": "cloudtrash-" + v["id"], "group": "Cloud", "title": f"{v['name']} trash",
+                              "desc": "Files you deleted from Google Drive still count against your storage until the trash is emptied.",
+                              "action": "cloud_empty", "size": v.get("trashed") or 0, "pending": False})
+        return {"running": j["running"], "items": items}
 
     def api_cleanup_run(self, b):
+        if b["id"].startswith("cloudtrash-"):
+            v = vol(b["id"][len("cloudtrash-"):])
+            before = v.get("trashed") or 0
+            ok, err = cloud.empty_trash(v)
+            cloud.volumes(force=True)
+            volumes()
+            return {"ok": ok, "error": err, "freed": before if ok else 0}
         r = cleanup.run(b["id"])
         j = JOB["cleanup"]
         if j and r.get("ok") and not r.get("launched"):
@@ -940,6 +1099,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- duplicates
     def api_dupes_start(self, b):
         vid = b["drive"]
+        if is_cloud(vid):
+            return {"error": "Duplicate search works on disks and folders on this computer, not on cloud drives yet."}
         j = JOB["dupes"]
         if j and j["running"]:
             j["cancel"] = True
@@ -1068,6 +1229,8 @@ class Handler(BaseHTTPRequestHandler):
         cur["keep"] = max(2, min(365, int(new.get("keep", cur["keep"]))))
         cur["notifyGB"] = max(0.0, float(new.get("notifyGB", cur["notifyGB"])))
         cur["theme"] = new.get("theme") if new.get("theme") in ("system", "light", "dark") else cur["theme"]
+        if "fastScan" in new:
+            cur["fastScan"] = bool(new["fastScan"])
         if "ignore" in new and isinstance(new["ignore"], dict):
             cur["ignore"] = {k: [str(p) for p in v] for k, v in new["ignore"].items() if v}
         if "watch" in new and isinstance(new["watch"], list):

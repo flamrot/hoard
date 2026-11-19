@@ -58,7 +58,7 @@ def human(b):
 # ---------------------------------------------------------------- tree
 class Node:
     __slots__ = ("name", "size", "nfiles", "dirs", "files", "cats", "osize", "ocount",
-                 "mtime", "msum", "own", "_idx")
+                 "mtime", "msum", "own", "cloud", "_idx")
 
     def __init__(self, name):
         self.name = name
@@ -72,6 +72,7 @@ class Node:
         self.mtime = 0           # newest modification time anywhere inside
         self.msum = 0            # sum(size * mtime): size-weighted age of the bytes inside
         self.own = 0             # newest modification time of files directly in this folder
+        self.cloud = 0           # bytes of online-only files (in the cloud, not on this disk)
         self._idx = None
 
     def child(self, name):
@@ -107,6 +108,8 @@ class Scan:
         self.running = True
         self.error = None
         self.exclude = set()
+        self.cloud = 0
+        self.fast = False
         self._tick = 0
 
 
@@ -114,6 +117,7 @@ def scan_dir(path, name, st):
     node = Node(name)
     kept = []
     size_of = plat.size_of
+    cloud_size = plat.cloud_size
     exclude = st.exclude
     try:
         it = os.scandir(path)
@@ -133,6 +137,7 @@ def scan_dir(path, name, st):
                     node.size += c.size
                     node.nfiles += c.nfiles
                     node.msum += c.msum
+                    node.cloud += c.cloud
                     if c.mtime > node.mtime:
                         node.mtime = c.mtime
                     nc = node.cats
@@ -143,6 +148,10 @@ def scan_dir(path, name, st):
                     s = e.stat(follow_symlinks=False)
                     sz = size_of(s)
                     mt = int(s.st_mtime)
+                    cs = cloud_size(s)
+                    if cs:
+                        node.cloud += cs
+                        st.cloud += cs
                     c = cat_of(e.name)
                     node.size += sz
                     node.nfiles += 1
@@ -212,7 +221,7 @@ def rel_parts(root, path):
 # scans/<volume id>/<unix time>.idx.json.gz  folder path -> size, for growth charts
 def _enc(n):
     return [n.name, n.size, n.nfiles, n.cats, n.osize, n.ocount,
-            [list(f) for f in n.files], [_enc(d) for d in n.dirs], n.mtime, n.msum, n.own]
+            [list(f) for f in n.files], [_enc(d) for d in n.dirs], n.mtime, n.msum, n.own, n.cloud]
 
 
 def _dec(a):
@@ -222,6 +231,8 @@ def _dec(a):
     n.dirs = [_dec(d) for d in a[7]]
     if len(a) > 8:
         n.mtime, n.msum, n.own = a[8], a[9], a[10]
+    if len(a) > 11:
+        n.cloud = a[11]
     return n
 
 
@@ -392,7 +403,9 @@ DEFAULTS = {"schedule": {"enabled": False, "time": "07:00", "volumes": []},
             "keep": 30, "notifyGB": 1.0, "theme": "system",
             "ignore": {},          # volume id -> ["folder/sub", ...]  hidden from the map and lists
             "watch": [],           # [{"vol", "path": [...], "gb"}]  alert when a folder passes a size
-            "reportDir": ""}       # save an HTML report here after each daily scan
+            "reportDir": "",       # save an HTML report here after each daily scan
+            "locations": [],       # extra folders / network shares to map: [{"path", "name"}]
+            "fastScan": False}     # Windows: read the NTFS file table directly (needs admin)
 
 
 def _read_json(name, default):

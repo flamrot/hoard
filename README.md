@@ -36,6 +36,17 @@ The app only listens on `127.0.0.1` and every request needs a per-launch token. 
 - **Age view**: color the map by when files were last modified to spot things untouched for a year or more.
 - **Growth chart** for any folder across saved scans, **size alerts** per folder, an **ignore list**, **quick preview** (Space) for images, video, audio and text, and **export** of any list as CSV or the folder as an HTML report.
 
+### More places to map
+- **Folders and network shares**: the **+** next to your disks adds any folder or `\\server\share` as its own map.
+- **Google Drive** (and OneDrive, Dropbox, Box, S3, SharePoint… through [rclone](https://rclone.org)): **+ → Connect Google Drive** installs rclone if needed and opens Google's sign-in. Hoard shows your quota (including Gmail and Photos), maps every file without downloading anything, and can move files to Drive's own trash and empty it. Other clouds: run `rclone config` once and they appear automatically.
+- **Online-only files** (OneDrive, iCloud, Google Drive for desktop placeholders) are counted separately, so the map shows what's really on the disk.
+
+### Fast scan (Windows)
+Settings → **Fast scan** reads the NTFS file table directly (like WizTree) with a small Rust helper, `native/` → `hoard-mft.exe`. A whole drive takes seconds instead of a minute. Windows asks for administrator permission each time; decline and Hoard scans normally. Daily scheduled scans use the normal scanner. Building it needs Rust (`winget install Rustlang.Rustup`); without Rust the build simply leaves it out.
+
+### Owner & permissions
+Right-click anything → **Owner & permissions…** shows the owner, attributes and who can do what, and for folders, which accounts own the space inside.
+
 ### Daily scans
 The daily scan is registered with the operating system, so it runs even when Hoard is closed:
 Windows Task Scheduler ("Hoard daily scan"), a launchd agent on macOS (`app.hoard.scan`), or a systemd user timer on Linux (`hoard-scan.timer`, with cron as a fallback). It runs `Hoard --scan`, which scans, saves, prunes old scans and notifies, then exits. Turning it off in Settings removes it.

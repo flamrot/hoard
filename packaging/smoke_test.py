@@ -178,6 +178,17 @@ def main():
         if not os.path.exists(api("export_report", {"drive": vid, "path": []})["file"]):
             fail("report not written")
         print("ignore, CSV and HTML export: ok")
+
+        # owner & permissions, extra locations
+        info = api("info", {"drive": vid, "path": ["sub"]})
+        if not info.get("info", {}).get("owner") or not info["info"].get("perms"):
+            fail(f"owner/permissions missing: {info}")
+        loc = api("add_location", {"path": os.path.join(target, "models")})
+        if loc.get("error") or loc["id"] not in {v["id"] for v in api("drives")["drives"]}:
+            fail(f"adding a location failed: {loc}")
+        if api("remove_location", {"drive": loc["id"]}).get("error"):
+            fail("removing a location failed")
+        print(f"owner ({info['info']['owner']}), permissions and locations: ok")
         if v["s"] < 6 * MB:
             fail(f"total too small: {v['s']}")
         files = api("files", {"drive": vid, "path": []})["items"]

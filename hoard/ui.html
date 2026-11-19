@@ -97,6 +97,19 @@ header {
 .dbar { height: 4px; border-radius: 2px; background: var(--line-2); overflow: hidden; }
 .dbar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 .dbar i.hot { background: var(--danger); }
+.drive.add { min-width: 0; padding: 6px 12px; border-style: dashed; color: var(--ink-3); }
+.drive.add .dl { font-weight: 500; font-size: 18px; line-height: 1; }
+.info-grid { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; font-size: 13px; margin: 10px 0; }
+.info-grid dt { color: var(--ink-3); }
+.info-grid dd { margin: 0; word-break: break-word; }
+.perm { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.perm small { color: var(--ink-3); }
+.add-sec { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-top: 12px; }
+.add-sec h4 { margin: 0 0 4px; font-size: 14px; }
+.add-sec p { margin: 0 0 10px; font-size: 12.5px; }
+.add-sec input[type="text"] { width: 100%; height: 34px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface-2); color: var(--ink); font: inherit; padding: 0 10px; }
+.add-sec .row-actions { margin-top: 10px; }
+.mono { font-family: var(--mono); font-size: 12px; }
 .hstatus { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
 #status { color: var(--ink-3); font-size: 12px; }
 .btn {
@@ -261,7 +274,7 @@ dialog {
   border: 1px solid var(--line); border-radius: 14px; padding: 24px; width: min(440px, calc(100% - 32px));
   background: var(--surface); color: var(--ink); box-shadow: var(--shadow);
 }
-dialog::backdrop { background: rgba(0,0,0,.4); backdrop-filter: blur(2px); }
+dialog::backdrop { background: rgba(0,0,0,.45); }
 dialog[open] { animation: pop .15s ease-out; }
 dialog h3 { margin: 0 0 8px; font-size: 17px; font-weight: 650; word-break: break-word; }
 dialog p { margin: 0 0 10px; color: var(--ink-2); }
@@ -615,6 +628,9 @@ const ICON = {
   hide: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2l12 12M6.5 3.3A7 7 0 0 1 8 3c4.5 0 7 5 7 5a12 12 0 0 1-2 2.6M10.6 12.4A6.5 6.5 0 0 1 8 13c-4.5 0-7-5-7-5a12 12 0 0 1 3-3.4"/></svg>',
   bell: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11zM6.5 14h3"/></svg>',
   more: '<svg viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>',
+  cloud: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" style="width:15px;height:15px;margin-right:5px;vertical-align:-2px"><path d="M4.5 12.5h7.5a3 3 0 0 0 .3-6A4.5 4.5 0 0 0 3.6 7.6 2.5 2.5 0 0 0 4.5 12.5z"/></svg>',
+  folder: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" style="width:15px;height:15px;margin-right:5px;vertical-align:-2px"><path d="M1.5 4.5v8h13v-7h-6l-1.5-2h-5z"/></svg>',
+  key: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="5" cy="11" r="3"/><path d="m7.2 8.8 6.3-6.3M11 5l2 2M12.5 3.5l1.5 1.5"/></svg>',
 };
 const AGE_NAMES = ["Last week", "Last month", "Last 3 months", "Last year", "Over a year ago", "Unknown"];
 const AGE_LIGHT = ["#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b", "#b4b2aa"];
@@ -677,7 +693,8 @@ const fullPath = p => {
   return p.length ? (r.endsWith(sep) ? r : r + sep) + p.join(sep) : r;
 };
 // Top-level items of a system disk can't be deleted; on other disks (macOS/Linux) the first level can.
-const canDelete = path => path.length >= (S.os === "windows" || vol().root === "/" ? 2 : 1);
+const canDelete = path => vol().type === "cloud" ? !!vol().trashable && path.length >= 1
+  : vol().location ? path.length >= 1 : path.length >= (S.os === "windows" || vol().root === "/" ? 2 : 1);
 async function copyText(t) {
   try { await navigator.clipboard.writeText(t); return true; } catch { /* fall through for webviews without clipboard access */ }
   const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
@@ -995,14 +1012,23 @@ function renderDrives() {
     const b = document.createElement("button");
     const on = d.id === S.drive, pct = d.total ? d.used / d.total : 0;
     b.className = "drive" + (on ? " on" : ""); b.setAttribute("aria-pressed", on); b.disabled = S.scanning;
-    b.title = `${d.name} (${d.root}) ${d.label || ""} — ${fmt(d.used)} used of ${fmt(d.total)}`;
-    b.innerHTML = `<span class="dl">${esc(d.name)}</span><span class="dm">
-      <span class="dn"><span>${esc(d.label || (d.type === "fixed" ? "Local disk" : d.type === "removable" ? "Removable" : "Network"))}</span><b class="num">${fmt(d.free)} free</b></span>
+    b.title = `${d.name} (${d.root}) ${d.label || ""}${d.total ? ` — ${fmt(d.used)} used of ${fmt(d.total)}` : ""}${d.location ? "\nRight-click to remove" : ""}`;
+    const icon = d.type === "cloud" ? ICON.cloud : d.type === "folder" || d.type === "network" ? ICON.folder : "";
+    b.innerHTML = `<span class="dl">${icon}${esc(d.name)}</span><span class="dm">
+      <span class="dn"><span>${esc(d.type === "cloud" ? (d.backend === "drive" ? "Google account" : "Cloud") : d.label || (d.type === "fixed" ? "Local disk" : d.type === "removable" ? "Removable" : "Network"))}</span><b class="num">${d.total ? fmt(d.free) + " free" : ""}</b></span>
       <span class="dbar"><i class="${pct > .9 ? "hot" : ""}" style="width:${(pct * 100).toFixed(1)}%"></i></span></span>`;
     b.onclick = () => { if (!on) selectDrive(d.id); };
+    if (d.location) b.oncontextmenu = e => { e.preventDefault(); popMenu(e.clientX, e.clientY, [{ label: `Remove “${d.name}” from Hoard`, icon: ICON.hide, run: () => removeLocation(d) }]); };
     el.appendChild(b);
   }
+  const add = document.createElement("button");
+  add.className = "drive add"; add.title = "Add a folder, network share or Google Drive"; add.setAttribute("aria-label", "Add a location");
+  add.innerHTML = `<span class="dl">+</span>`; add.disabled = S.scanning;
+  add.onclick = openAddLocation;
+  el.appendChild(add);
 }
+const isCloudVol = () => vol().type === "cloud";
+const binName = () => isCloudVol() ? `${vol().name} trash` : S.trashName;
 function renderStatus() {
   const btn = $("#scanBtn"), st = $("#status");
   btn.disabled = !S.drive || S.scanning;
@@ -1033,10 +1059,17 @@ function renderCrumbs() {
   }
   if (S.view.ign) html += `<button class="chip note" id="ignChip" style="border:0;cursor:pointer" title="Folders on your ignore list are left out of the map and lists. Manage them in Settings.">${fmt(S.view.ign)} ignored</button>`;
   if (S.view.hidden) html += `<span class="chip note" title="${esc(S.hiddenNote)}">${fmt(S.view.hidden)} not visible to the scan ⓘ</span>`;
+  if (S.view.cl && !S.path.length) html += `<span class="chip note" title="Online-only files from OneDrive, iCloud or Google Drive for desktop. They're in the cloud, not on this disk, so the map leaves them out.">+ ${fmt(S.view.cl)} online-only</span>`;
+  if (isCloudVol() && !S.path.length) {
+    const v = vol();
+    if (v.other) html += `<span class="chip note" title="Gmail and Google Photos share this storage quota but aren't files Hoard can list">${fmt(v.other)} in Gmail &amp; Photos</span>`;
+    if (v.trashed) html += `<button class="chip note" id="cloudTrashChip" style="border:0;cursor:pointer" title="Deleted files still count against your storage. Click to see it in Clean up.">${fmt(v.trashed)} in trash</button>`;
+  }
   html += deltaHTML(S.view);
   html += `<span class="total num">${fmt(S.view.s)}</span>`;
   vs.innerHTML = html;
   const ic = $("#ignChip"); if (ic) ic.onclick = openSettings;
+  const ctc = $("#cloudTrashChip"); if (ctc) ctc.onclick = () => setMode("cleanup");
   const cmp = $("#cmpSel");
   if (cmp) cmp.onchange = async () => {
     try {
@@ -1063,12 +1096,14 @@ function renderSel() {
     <div class="spath">${esc(fullPath(path))}</div>
     <div class="ssize"><b class="num">${fmt(n.s)}</b><span class="num">${pct}</span></div>
     <div class="smeta">${n.k === "d" && n.f ? `<span class="chip num">${n.f.toLocaleString()} files</span>` : ""}${deltaHTML(n)}${ageChip}
+      ${n.cl ? `<span class="chip" title="Online-only files (OneDrive, iCloud, Google Drive for desktop…) are in the cloud, not on this disk, so they aren't counted above">${ICON.cloud.replace("margin-right:5px", "margin-right:2px").replace(/15px/g, "12px")}+ ${fmt(n.cl)} online-only</span>` : ""}
       ${w ? `<span class="chip grow" title="You'll get a notification after a daily scan if it passes this size">${ICON.bell.replace("<svg", '<svg style="width:12px;height:12px"')} alert at ${w.gb} GB</span>` : ""}</div>
     ${n.k !== "f" ? `<div class="trend" id="trend"></div>` : ""}
     <div class="actions">
       ${!isView && n.k === "d" ? `<button class="btn" data-act="zoom">${ICON.zoom}Open</button>` : ""}
-      ${n.k === "f" ? `<button class="btn" data-act="preview" title="Preview (Space)">${ICON.eye}Preview</button>` : ""}
-      <button class="btn" data-act="reveal">${ICON.open}${n.k === "f" ? S.revealName : S.revealName}</button>
+      ${n.k === "f" && !isCloudVol() ? `<button class="btn" data-act="preview" title="Preview (Space)">${ICON.eye}Preview</button>` : ""}
+      ${isCloudVol() ? (vol().backend === "drive" || vol().backend === "onedrive" || vol().backend === "dropbox" ? `<button class="btn" data-act="reveal">${ICON.launch}Find online</button>` : "")
+        : `<button class="btn" data-act="reveal">${ICON.open}${S.revealName}</button>`}
       ${!isView && canRecycle ? `<button class="btn" data-act="stage" title="Add to the staging area (S)">${ICON.stage}Stage</button>` : ""}
       <button class="btn ghost icon" data-act="more" title="More actions" aria-label="More actions">${ICON.more}</button>
     </div>`;
@@ -1253,6 +1288,31 @@ async function act(what, path, n) {
     return;
   }
   if (what === "watch") return askWatch(path, n);
+  if (what === "info") return showInfo(path, n);
+}
+async function showInfo(path, n) {
+  const d = $("#dlg"); d.className = "wide";
+  d.innerHTML = `<h3>${esc(n.n || vol().name)}</h3><div class="dpath">${esc(fullPath(path))}</div><div class="loading">${SPIN}Reading permissions…</div>`;
+  d.showModal();
+  let r;
+  try { r = await api("info", { drive: S.drive, path }); } catch (e) { r = { error: e.message }; }
+  if (!d.open) return;
+  if (r.error) { d.querySelector(".loading").outerHTML = `<p>${esc(r.error)}</p>`; return; }
+  const i = r.info;
+  const owners = r.owners?.length ? `<h4 style="margin:16px 0 6px">Who owns the space in here</h4>
+      <div class="stack" style="height:8px">${r.owners.map((o, k) => `<i style="flex:${o.s};background:var(--c${k % 8})" title="${esc(o.owner)} · ${fmt(o.s)}"></i>`).join("")}</div>
+      ${r.owners.map((o, k) => `<div class="perm"><span><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--c${k % 8});margin-right:7px"></i>${esc(o.owner)}</span><span class="num">${fmt(o.s)}</span></div>`).join("")}
+      <p style="font-size:12px;color:var(--ink-3);margin-top:6px">Based on the owner of each item directly inside this folder.</p>` : "";
+  d.innerHTML = `<h3>${esc(n.n || vol().name)}</h3><div class="dpath">${esc(fullPath(path))}</div>
+    <dl class="info-grid"><dt>Owner</dt><dd>${esc(i.owner)}</dd>
+      ${i.mode ? `<dt>Mode</dt><dd class="mono">${esc(i.mode)}</dd>` : ""}
+      <dt>Attributes</dt><dd>${i.attrs.length ? i.attrs.map(esc).join(", ") : "None"}</dd></dl>
+    <h4 style="margin:12px 0 6px">Who can do what</h4>
+    ${i.perms.length ? i.perms.map(p => `<div class="perm"><span>${esc(p.who)}${p.inherited ? ` <small>inherited</small>` : ""}${p.deny ? ` <small style="color:var(--danger)">deny</small>` : ""}</span><span>${esc(p.can)}</span></div>`).join("") : "<p>Couldn't read the permissions.</p>"}
+    ${owners}
+    <div class="row-actions"><button class="btn primary" id="infoClose" autofocus>Close</button></div>`;
+  $("#infoClose").onclick = () => d.close();
+  d.onclose = () => { d.onclose = null; d.className = ""; };
 }
 const isIgnored = path => (S.ignore[S.drive] || []).includes(path.join("/"));
 function stageItem(path, n) { return { path, name: n.n || path[path.length - 1], size: n.s, kind: n.k === "o" ? "d" : n.k, c: n.c ?? 8 }; }
@@ -1279,11 +1339,12 @@ function confirmRecycle(path, n) {
   if (S.scanning) return toast("Wait for the scan to finish before removing things.", "error");
   const d = $("#dlg");
   d.className = "";
-  const bin = S.trashName;
-  d.innerHTML = `<h3>Move “${esc(n.n)}” to the ${bin}?</h3>
+  const bin = binName();
+  d.innerHTML = `<h3>Move “${esc(n.n)}” to the ${esc(bin)}?</h3>
     <div class="dpath">${esc(fullPath(path))}</div>
     <p>${n.k === "d" ? `This folder and everything in it (${fmt(n.s)}${n.f ? `, ${n.f.toLocaleString()} files` : ""})` : `This ${fmt(n.s)} file`} will go to the ${bin}, where you can restore it.</p>
-    <p>The space is freed once you empty the ${bin}.${S.os === "windows" ? " If something is too large for the bin, Windows asks before deleting it permanently." : ""}</p>
+    <p>${isCloudVol() ? `It stays recoverable in the ${esc(bin)} until that's emptied; only then does it stop counting against your storage.`
+      : `The space is freed once you empty the ${bin}.${S.os === "windows" ? " If something is too large for the bin, Windows asks before deleting it permanently." : ""}`}</p>
     <div class="row-actions"><button class="btn" value="cancel" autofocus>Cancel</button><button class="btn danger solid" value="ok">${ICON.trash}Move to ${bin}</button></div>`;
   d.querySelector('[value="cancel"]').onclick = () => d.close();
   d.querySelector('[value="ok"]').onclick = async e => {
@@ -1304,18 +1365,20 @@ function confirmRecycle(path, n) {
 const menu = $("#menu");
 function openMenu(x, y, path, n, fromButton) {
   const canRecycle = canDelete(path), delKey = S.os === "macos" ? "⌘⌫" : "Del";
-  const isView = same(path, S.path);
+  const isView = same(path, S.path), cloudVol = isCloudVol();
   menu.innerHTML = `
     ${n.k === "d" && !isView ? `<button data-act="zoom" role="menuitem">${ICON.zoom}Open<kbd>Double-click</kbd></button>` : ""}
-    ${n.k === "f" ? `<button data-act="preview" role="menuitem">${ICON.eye}Preview<kbd>Space</kbd></button>
+    ${n.k === "f" && !cloudVol ? `<button data-act="preview" role="menuitem">${ICON.eye}Preview<kbd>Space</kbd></button>
       <button data-act="launch" role="menuitem">${ICON.launch}Open with default app</button>` : ""}
-    <button data-act="reveal" role="menuitem">${ICON.open}${n.k === "d" ? `Open in ${S.revealName}` : `Show in ${S.revealName}`}</button>
+    ${cloudVol ? `<button data-act="reveal" role="menuitem">${ICON.launch}Find it online</button>`
+      : `<button data-act="reveal" role="menuitem">${ICON.open}${n.k === "d" ? `Open in ${S.revealName}` : `Show in ${S.revealName}`}</button>`}
     <button data-act="copy" role="menuitem">${ICON.copy}Copy path</button>
+    ${!cloudVol ? `<button data-act="info" role="menuitem">${ICON.key}Owner &amp; permissions…</button>` : ""}
     ${S.path.length && !fromButton ? `<button data-act="up" role="menuitem">${ICON.up}Up one level<kbd>Backspace</kbd></button>` : ""}
     ${path.length ? `<hr>${n.k === "d" ? `<button data-act="watch" role="menuitem">${ICON.bell}${watchFor(path) ? "Change size alert…" : "Alert me when it gets big…"}</button>` : ""}
       <button data-act="${isIgnored(path) ? "unignore" : "ignore"}" role="menuitem">${ICON.hide}${isIgnored(path) ? "Stop ignoring" : `Ignore this ${n.k === "d" ? "folder" : "file"}`}</button>` : ""}
     ${canRecycle ? `<hr><button data-act="stage" role="menuitem">${ICON.stage}Add to staging area<kbd>S</kbd></button>
-      <button data-act="recycle" class="danger" role="menuitem">${ICON.trash}Move to ${S.trashName} now…<kbd>${delKey}</kbd></button>` : ""}`;
+      <button data-act="recycle" class="danger" role="menuitem">${ICON.trash}Move to ${esc(binName())} now…<kbd>${delKey}</kbd></button>` : ""}`;
   menu.querySelectorAll("button").forEach(b => b.onclick = () => b.dataset.act === "up" ? (closeMenu(), goUp()) : act(b.dataset.act, path, n));
   menu.style.display = "block";
   const mw = menu.offsetWidth, mh = menu.offsetHeight;
@@ -1381,15 +1444,19 @@ function showState(kind, data) {
     stateEl.innerHTML = `<div class="loading"><div class="spinner"></div>Opening the last scan of ${vn}…</div>`;
   } else if (kind === "empty") {
     stateEl.innerHTML = `<div class="card"><h2>${vn} hasn't been scanned yet</h2>
-      <p>Hoard reads every folder on the drive and draws it as a map, so the biggest things are the biggest blocks.
-      ${d ? `This drive has <b>${fmt(d.used)}</b> in use, which usually takes a minute or two.` : ""} Nothing is changed or uploaded.</p>
+      ${d?.type === "cloud" ? `<p>Hoard lists every file in your ${vn} through rclone and draws it as a map. Nothing is downloaded or changed${d.used ? `; ${fmt(d.used)} of your storage is in use` : ""}.</p>`
+      : `<p>Hoard reads every folder ${d?.type === "folder" || d?.type === "network" ? "in this location" : "on the drive"} and draws it as a map, so the biggest things are the biggest blocks.
+      ${d && d.type !== "folder" && d.type !== "network" ? `This drive has <b>${fmt(d.used)}</b> in use, which usually takes a minute or two.` : ""} Nothing is changed or uploaded.</p>`}
+      ${S.fastScan && S.fastVols.includes(S.drive) ? `<p>Fast scan is on: Windows will ask for administrator permission.</p>` : ""}
       ${S.os === "macos" && vol().root === "/" ? `<p>Tip: give Hoard <b>Full Disk Access</b> in System Settings → Privacy &amp; Security, or many folders will show as unreadable.</p>` : ""}
       ${S.os === "linux" && vol().root === "/" ? `<p>Folders your account can't read (other users' files, some system folders) are skipped and counted as unreadable.</p>` : ""}
       <button class="btn primary" id="emptyScan">Scan ${vn}</button></div>`;
     $("#emptyScan").onclick = startScan;
   } else if (kind === "scan") {
     stateEl.innerHTML = `<div class="card" role="status">
-      <div class="h">Scanning ${vn}</div>
+      <div class="h">${S.scanFast ? "Fast scan of" : "Scanning"} ${vn}</div>
+      ${S.scanFast ? `<p style="margin:4px 0 0;font-size:12.5px">Windows asks for administrator permission to read the file table directly. Say no and Hoard scans the normal way.</p>` : ""}
+      ${isCloudVol() ? `<p style="margin:4px 0 0;font-size:12.5px">Listing every file through rclone. Nothing is downloaded; big drives take a few minutes.</p>` : ""}
       <div class="big num"><span id="scBytes">0 B</span><span class="of" id="scOf"></span></div>
       <div class="progress" id="scBar"><i></i></div>
       <div class="scanmeta num"><span id="scFiles">Starting…</span><span id="scTime"></span></div>
@@ -1441,9 +1508,11 @@ function animateBytes() {
 }
 async function startScan() {
   if (!S.drive || S.scanning) return;
+  const fast = S.fastScan && S.fastVols.includes(S.drive);
   try {
-    const r = await api("scan", { drive: S.drive });
+    const r = await api("scan", { drive: S.drive, fast });
     if (r.error) return toast(r.error, "error");
+    S.scanFast = !!r.fast;
   } catch (e) { return toast(e.message, "error"); }
   S.scanning = true; S.scanMin = false; S.lastProg = null; shownBytes = targetBytes = 0;
   closeMenu(); tip.style.display = "none";
@@ -2051,12 +2120,93 @@ async function uninstallApp(a) {
   if (r.error) toast(r.error, "error"); else toast(`Started the uninstaller for ${a.name}`, "ok", "Press Refresh here when it's finished.");
 }
 
+/* ------------------------------------------------------------------ add locations: folders, network shares, clouds */
+async function openAddLocation() {
+  const d = $("#dlg"); d.className = "wide";
+  const eg = S.os === "windows" ? "D:\\Games  or  \\\\nas\\media" : S.os === "macos" ? "/Volumes/Backup/Projects" : "/mnt/nas/media";
+  d.innerHTML = `<h3>Add a location</h3><p>Map a folder, a network share or a cloud drive alongside your disks.</p>
+    <div class="add-sec"><h4>${ICON.folder}Folder or network share</h4>
+      <p>Paste a path. Network shares work too${S.os === "windows" ? " (\\\\server\\share)" : ""}, as long as this account can open them.</p>
+      <input type="text" id="locPath" placeholder="${esc(eg)}" spellcheck="false" autocomplete="off">
+      <div class="row-actions"><button class="btn primary" id="locAdd">Add folder</button></div></div>
+    <div class="add-sec" id="cloudSec"><h4>${ICON.cloud}Google Drive and other clouds</h4><div class="loading">${SPIN}Checking for rclone…</div></div>
+    <div class="row-actions"><button class="btn" id="locClose">Close</button></div>`;
+  $("#locClose").onclick = () => d.close();
+  const addFolder = async () => {
+    const r = await api("add_location", { path: $("#locPath").value });
+    if (r.error) return toast(r.error, "error");
+    d.close(); await refreshDrives(); selectDrive(r.id);
+  };
+  $("#locAdd").onclick = addFolder;
+  $("#locPath").onkeydown = e => { if (e.key === "Enter") addFolder(); };
+  d.onclose = () => { d.onclose = null; d.className = ""; clearTimeout(cloudT); };
+  d.showModal();
+  $("#locPath").focus();
+  drawCloudSection();
+}
+let cloudT = 0;
+async function drawCloudSection() {
+  const sec = $("#cloudSec");
+  if (!sec || !$("#dlg").open) return;
+  let st;
+  try { st = await api("cloud_status"); } catch (e) { sec.innerHTML = `<p>${esc(e.message)}</p>`; return; }
+  const head = `<h4>${ICON.cloud}Google Drive and other clouds</h4>`;
+  const busy = j => j && j.running;
+  if (!st.installed) {
+    const inst = st.install;
+    sec.innerHTML = `${head}<p>Hoard reaches cloud storage through <b>rclone</b>, a free open-source tool that handles the sign-in with Google (and OneDrive, Dropbox, Box, S3, SharePoint and more). Your sign-in stays in rclone's own settings on this computer.</p>
+      ${busy(inst) ? `<div class="loading">${SPIN}Installing rclone…</div>`
+        : inst && inst.ok === false ? `<p style="color:var(--danger)">The install didn't finish.</p><pre class="mono" style="white-space:pre-wrap;max-height:120px;overflow:auto">${esc(inst.log.slice(-600))}</pre>` : ""}
+      <div class="row-actions"><button class="btn primary" id="rcInstall" ${busy(inst) ? "disabled" : ""}>${S.os === "windows" ? "Install rclone with winget" : S.os === "macos" ? "Install rclone with Homebrew" : "How to install rclone"}</button></div>`;
+    $("#rcInstall").onclick = async () => {
+      const r = await api("cloud_install");
+      if (r.command) { toast(await copyText(r.command) ? "Install command copied" : r.command, "ok", "Run it in a terminal, then reopen this dialog."); return; }
+      drawCloudSection();
+    };
+    if (busy(inst)) cloudT = setTimeout(drawCloudSection, 1500);
+    return;
+  }
+  const conn = st.connect, drives = st.remotes.filter(x => x.type === "drive");
+  sec.innerHTML = `${head}
+    ${st.remotes.length ? `<p>Connected through rclone: ${st.remotes.map(x => `<b>${esc(x.pretty)}</b> (“${esc(x.name)}”)`).join(", ")}. They appear next to your disks.</p>` : ""}
+    ${busy(conn) ? `<div class="loading">${SPIN}Waiting for you to sign in to Google in your browser…</div>
+        <p style="margin-top:8px;font-size:12px">If no browser tab opened, the sign-in link is below.</p><pre class="mono" style="white-space:pre-wrap;max-height:90px;overflow:auto">${esc((conn.log.match(/https?:\/\/\S+/g) || []).slice(-1)[0] || "")}</pre>`
+      : conn && conn.ok === false ? `<p style="color:var(--danger)">Google Drive wasn't connected.</p><pre class="mono" style="white-space:pre-wrap;max-height:120px;overflow:auto">${esc(conn.log.slice(-600))}</pre>`
+      : `<p>${drives.length ? "Connect another Google account:" : "Connect your Google Drive: your browser opens Google's sign-in page."}</p>
+        <label class="cand" style="grid-template-columns:22px 1fr"><input type="checkbox" id="gdWrite"><span>Let Hoard move files to the Google Drive trash (otherwise it can only look)</span></label>
+        <div class="row-actions"><button class="btn primary" id="gdConnect">Connect Google Drive</button></div>`}
+    <p style="font-size:12px;color:var(--ink-3);margin-top:10px">For OneDrive, Dropbox, S3, SharePoint and others, run <span class="mono">rclone config</span> in a terminal; they show up here automatically.
+      <button class="btn ghost" id="rcRefresh" style="height:26px">Check again</button></p>`;
+  const go = $("#gdConnect");
+  if (go) go.onclick = async () => {
+    const name = drives.length ? `gdrive${drives.length + 1}` : "gdrive";
+    const r = await api("cloud_connect", { name, readonly: !$("#gdWrite").checked });
+    if (r.error) return toast(r.error, "error");
+    drawCloudSection();
+  };
+  $("#rcRefresh").onclick = async () => { const r = await api("cloud_refresh"); S.drives = r.drives; renderDrives(); drawCloudSection(); };
+  if (busy(conn)) cloudT = setTimeout(drawCloudSection, 1500);
+  else if (conn && conn.ok && !S.drives.some(x => x.type === "cloud")) {
+    const r = await api("cloud_refresh"); S.drives = r.drives; renderDrives();
+    toast("Google Drive connected", "ok", "Pick it next to your disks and press Scan.");
+  }
+}
+async function removeLocation(d) {
+  const ok = await confirmDialog(`Remove “${d.name}” from Hoard?`, `<p>Only Hoard's shortcut to <span class="mono">${esc(d.root)}</span> is removed. The folder and its files aren't touched.</p>`, "Remove", false);
+  if (!ok) return;
+  const r = await api("remove_location", { drive: d.id });
+  if (r.error) return toast(r.error, "error");
+  await refreshDrives();
+  if (S.drive === d.id) { const sys = S.drives.find(x => x.id === "C" || x.id === "root") || S.drives[0]; if (sys) selectDrive(sys.id); }
+}
+
 /* ------------------------------------------------------------------ boot */
 async function refreshDrives() {
   try {
     const r = await api("drives");
     Object.assign(S, { drives: r.drives, os: r.os, sep: r.sep, trashName: r.trashName, revealName: r.revealName,
-                       ignore: r.ignore || {}, watch: r.watch || [], hiddenNote: r.hiddenNote || "" });
+                       ignore: r.ignore || {}, watch: r.watch || [], hiddenNote: r.hiddenNote || "",
+                       fastScan: !!r.fastScan, fastVols: r.fastVols || [] });
     document.documentElement.dataset.os = r.os;
     if (r.theme !== S.theme) applyTheme(r.theme);
   } catch (e) { toast(e.message, "error"); }
@@ -2134,6 +2284,10 @@ async function openSettings() {
           sch.installed ? `Scheduled — next scan ${nextRun(st.schedule.time)}` : st.schedule.enabled ? "Not registered with the system yet. Save to try again." : "Off"}</div>
       </div>
     </section>
+    ${S.os === "windows" ? `<section class="set"><div class="set-row"><div><b>Fast scan</b><small>${S.fastVols.length
+        ? "Reads the NTFS file table directly, the way WizTree does: a whole drive in seconds. Windows asks for administrator permission each time. Daily scheduled scans still use the normal scanner."
+        : "Not available in this build (it needs the hoard-mft helper), or no NTFS drives found."}</small></div>
+      <label class="switch"><input type="checkbox" id="stFast" ${S.fastScan ? "checked" : ""} ${S.fastVols.length ? "" : "disabled"} aria-label="Fast scan"><span></span></label></div></section>` : ""}
     <section class="set"><div class="set-row"><div><b>Tell me when a disk grows by more than</b><small>Checked after each daily scan. Shows a system notification.</small></div>
       <select id="stNotify">${opt([0, 0.5, 1, 2, 5, 10], st.notifyGB, v => +v ? (v < 1 ? v * 1000 + " MB" : v + " GB") : "Never")}</select></div></section>
     <section class="set"><div class="set-row"><div><b>Keep scan history</b><small>Older scans are deleted automatically. Saved scans now use ${fmt(r.storage)}.</small></div>
@@ -2180,14 +2334,15 @@ async function openSettings() {
       schedule: { enabled: on.checked, time: $("#stTime").value,
                   volumes: [...d.querySelectorAll(".checks input:checked")].map(x => x.value) },
       notifyGB: +$("#stNotify").value, keep: +$("#stKeep").value, theme,
-      ignore: ign, watch, reportDir: $("#stReport").checked ? (st.reportDir || r.defaultReportDir) : "" } };
+      ignore: ign, watch, reportDir: $("#stReport").checked ? (st.reportDir || r.defaultReportDir) : "",
+      fastScan: $("#stFast") ? $("#stFast").checked : false } };
     btn.disabled = true; err.hidden = true;
     try {
       const res = await api("save_settings", body);
       if (res.error) { err.textContent = res.error; err.hidden = false; btn.disabled = false; return; }
       saved = true; d.close();
       const ignChanged = JSON.stringify(res.settings.ignore) !== JSON.stringify(S.ignore);
-      S.ignore = res.settings.ignore; S.watch = res.settings.watch;
+      S.ignore = res.settings.ignore; S.watch = res.settings.watch; S.fastScan = !!res.settings.fastScan;
       if (ignChanged && S.view) loadView(S.path, { force: true }); else if (S.view) renderSel();
       toast(on.checked ? `Daily scan set for ${nextRun(body.settings.schedule.time)} and every day after` : "Settings saved");
     } catch (e) { err.textContent = e.message; err.hidden = false; btn.disabled = false; }

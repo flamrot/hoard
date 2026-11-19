@@ -19,6 +19,10 @@ def size_of(st):
     return st.st_blocks * 512   # real allocation, so sparse VM/container images don't inflate the map
 
 
+def cloud_size(st):
+    return 0
+
+
 def _unescape(s):
     return s.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
 

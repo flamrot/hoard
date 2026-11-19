@@ -11,8 +11,16 @@ TRASH_NAME = "Recycle Bin"
 REVEAL_NAME = "Explorer"
 
 
+# OneDrive / Google Drive for desktop / Dropbox "online-only" placeholders: the bytes live in the cloud
+CLOUD_ATTRS = 0x400000 | 0x40000 | 0x1000   # RECALL_ON_DATA_ACCESS | RECALL_ON_OPEN | OFFLINE
+
+
 def size_of(st):
-    return st.st_size
+    return 0 if st.st_file_attributes & CLOUD_ATTRS else st.st_size
+
+
+def cloud_size(st):
+    return st.st_size if st.st_file_attributes & CLOUD_ATTRS else 0
 
 
 def list_volumes():
@@ -295,6 +303,69 @@ def run_uninstall(app):
         return True, None
     except OSError as ex:
         return False, str(ex)
+
+
+_ATTR_NAMES = [(0x1, "Read-only"), (0x2, "Hidden"), (0x4, "System"), (0x20, "Archive"), (0x800, "Compressed"),
+               (0x4000, "Encrypted"), (0x200, "Sparse"), (0x400, "Link or junction"), (CLOUD_ATTRS, "Online-only (in the cloud)")]
+_PERM = {"F": "Full control", "M": "Modify", "RX": "Read & run", "R": "Read", "W": "Write", "D": "Delete",
+         "N": "No access", "GR": "Read", "GW": "Write", "GA": "Full control", "GE": "Run", "RD": "Read",
+         "WD": "Write", "AD": "Add files", "X": "Run", "DE": "Delete", "DC": "Delete contents", "RA": "Read",
+         "REA": "Read", "WA": "Write", "WEA": "Write", "WDAC": "Change permissions", "WO": "Take ownership",
+         "RC": "Read permissions", "MA": "Full control"}
+
+
+def _owner_sid(path):
+    adv = ctypes.windll.advapi32
+    adv.GetNamedSecurityInfoW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD] + [ctypes.POINTER(ctypes.c_void_p)] * 5
+    adv.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    adv.LookupAccountSidW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+                                      wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
+    ctypes.windll.kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    owner, sd = ctypes.c_void_p(), ctypes.c_void_p()
+    if adv.GetNamedSecurityInfoW(path, 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(sd)) != 0:
+        return None
+    try:
+        name, dom = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(256)
+        n, d, use = wintypes.DWORD(256), wintypes.DWORD(256), wintypes.DWORD()
+        if adv.LookupAccountSidW(None, owner, name, ctypes.byref(n), dom, ctypes.byref(d), ctypes.byref(use)):
+            return f"{dom.value}\\{name.value}" if dom.value else name.value
+        sid = wintypes.LPWSTR()
+        if adv.ConvertSidToStringSidW(owner, ctypes.byref(sid)):
+            s = sid.value
+            ctypes.windll.kernel32.LocalFree(sid)
+            return s
+        return None
+    finally:
+        ctypes.windll.kernel32.LocalFree(sd)
+
+
+def owner_of(path):
+    return _owner_sid(path) or "Unknown"
+
+
+def file_info(path):
+    a = ctypes.windll.kernel32.GetFileAttributesW(path)
+    attrs = [n for bit, n in _ATTR_NAMES if a != 0xFFFFFFFF and a & bit]
+    perms = []
+    try:
+        r = _run(["icacls", path], timeout=10)
+        lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+        if lines and lines[0].lower().startswith(path.lower()):
+            lines[0] = lines[0][len(path):].strip()
+        for ln in lines:
+            if ln.lower().startswith("successfully") or ":" not in ln:
+                continue
+            who, rights = ln.rsplit(":", 1)
+            groups = [c for c in rights.replace(")", "").split("(") if c]
+            codes = [x for g in groups for x in g.split(",")]
+            words = [_PERM[c] for c in codes if c in _PERM]
+            can = ", ".join(dict.fromkeys(words)) or rights
+            if "IO" in codes:
+                can += " (for what's inside)"
+            perms.append({"who": who.strip(), "can": can, "inherited": "I" in codes, "deny": "DENY" in rights.upper()})
+    except Exception:  # noqa: BLE001
+        pass
+    return {"owner": _owner_sid(path) or "Unknown", "attrs": attrs, "perms": perms}
 
 
 def app_browsers():

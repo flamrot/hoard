@@ -28,6 +28,7 @@ DATA_DIR = os.environ.get("HOARD_DATA_DIR") or _os.DATA_DIR
 TRASH_NAME = _os.TRASH_NAME
 REVEAL_NAME = _os.REVEAL_NAME
 size_of = _os.size_of
+cloud_size = _os.cloud_size                # bytes of an online-only (cloud placeholder) file, else 0
 list_volumes = _os.list_volumes
 scan_excludes = _os.scan_excludes
 trash = _os.trash
@@ -44,6 +45,50 @@ cleanup_specs = _os.cleanup_specs          # () -> [cleanup target dicts], see c
 installed_apps = _os.installed_apps        # () -> [app dicts], see apps.py
 run_uninstall = _os.run_uninstall          # (app) -> (ok, error)
 HIDDEN_NOTE = _os.HIDDEN_NOTE              # why "used" space can exceed what the scan sees
+
+
+def file_info(path):
+    """Owner, attributes and permissions of a file or folder, for the details panel."""
+    if NAME == "windows":
+        return _os.file_info(path)
+    import grp
+    import pwd
+    import stat as st_
+    s = os.lstat(path)
+    try:
+        owner = pwd.getpwuid(s.st_uid).pw_name
+    except KeyError:
+        owner = str(s.st_uid)
+    try:
+        group = grp.getgrgid(s.st_gid).gr_name
+    except KeyError:
+        group = str(s.st_gid)
+    mode = st_.filemode(s.st_mode)
+
+    def words(rwx):
+        w = [n for c, n in zip(rwx, ("Read", "Write", "Run")) if c != "-"]
+        return ", ".join(w) or "No access"
+    attrs = []
+    if os.path.basename(path).startswith("."):
+        attrs.append("Hidden")
+    if getattr(s, "st_flags", 0) & 0x2:
+        attrs.append("Locked")
+    if st_.S_ISLNK(s.st_mode):
+        attrs.append("Symbolic link")
+    return {"owner": owner, "attrs": attrs, "mode": mode,
+            "perms": [{"who": f"{owner} (owner)", "can": words(mode[1:4])},
+                      {"who": f"{group} (group)", "can": words(mode[4:7])},
+                      {"who": "Everyone else", "can": words(mode[7:10])}]}
+
+
+def owner_of(path):
+    if NAME == "windows":
+        return _os.owner_of(path)
+    import pwd
+    try:
+        return pwd.getpwuid(os.lstat(path).st_uid).pw_name
+    except (OSError, KeyError):
+        return "Unknown"
 
 
 def _known_folder(guid_hex, xdg_name, fallback):

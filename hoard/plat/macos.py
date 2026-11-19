@@ -16,6 +16,11 @@ def size_of(st):
     return st.st_blocks * 512   # real allocation: sparse files (Docker.raw, VM disks) and clones count correctly
 
 
+def cloud_size(st):
+    """iCloud Drive 'dataless' files (Optimize Mac Storage) have their bytes in iCloud."""
+    return st.st_size if getattr(st, "st_flags", 0) & 0x40000000 else 0
+
+
 def _startup_name():
     try:
         for n in os.listdir("/Volumes"):
