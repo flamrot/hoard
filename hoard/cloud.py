@@ -249,6 +249,55 @@ def web_url(v, name):
     return None
 
 
+# ---------------------------------------------------------------- duplicates from the cloud's own checksums
+def dupes_start(v, parts, min_size):
+    """Group files by (size, checksum) using hashes the cloud already stores (Google Drive: MD5).
+    Nothing is downloaded."""
+    job = {"running": True, "phase": "Listing files and their checksums", "done": 0, "total": 0, "groups": None,
+           "cancel": False, "cancelled": False, "error": None, "candidates": 0, "vol": v["id"]}
+
+    def go():
+        try:
+            proc = subprocess.Popen([exe(), "lsjson", "-R", "--hash", "--files-only", "--fast-list", "--no-mimetype",
+                                     remote_path(v, parts)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    encoding="utf-8", errors="replace", creationflags=NO_WINDOW, env=plat.host_env())
+            by = {}
+            for line in proc.stdout:
+                if job["cancel"]:
+                    proc.kill()
+                    job["cancelled"] = True
+                    break
+                line = line.strip().rstrip(",")
+                if not line.startswith("{"):
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                size = int(o.get("Size") or 0)
+                if size < min_size:
+                    continue
+                h = o.get("Hashes") or {}
+                digest = h.get("md5") or h.get("sha1") or h.get("sha256") or h.get("quickxor") or h.get("dropbox")
+                if not digest:
+                    continue
+                job["candidates"] += 1
+                pp = list(parts) + o["Path"].split("/")
+                by.setdefault((size, digest), []).append({"p": pp, "path": remote_path(v, pp), "m": _ts(o.get("ModTime", ""))})
+            proc.wait()
+            if not job["cancelled"] and proc.returncode != 0:
+                raise RuntimeError((proc.stderr.read().strip().splitlines() or ["rclone failed"])[-1])
+            groups = [{"size": s, "wasted": s * (len(fs) - 1), "c": core.cat_of(fs[0]["p"][-1]),
+                       "files": sorted(fs, key=lambda f: f["m"])} for (s, _h), fs in by.items() if len(fs) > 1]
+            job["groups"] = sorted(groups, key=lambda g: -g["wasted"])
+        except Exception as ex:  # noqa: BLE001
+            job["error"] = str(ex)
+        finally:
+            job["running"] = False
+    threading.Thread(target=go, daemon=True).start()
+    return job
+
+
 # ---------------------------------------------------------------- setup: install rclone, connect Google Drive
 JOBS = {"install": None, "connect": None}
 

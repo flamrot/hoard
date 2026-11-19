@@ -239,6 +239,18 @@ def run_uninstall(app):
     return False, "Move the app to the Trash from Hoard's staging area."
 
 
+def context_menu_install(argv):
+    return False, "On macOS, drag a folder onto Hoard's icon in the Dock instead (a Finder Quick Action isn't built in yet)."
+
+
+def context_menu_remove():
+    return True, None
+
+
+def context_menu_status():
+    return False
+
+
 def app_browsers():
     cands = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
              "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",

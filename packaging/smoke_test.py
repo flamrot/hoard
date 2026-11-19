@@ -177,6 +177,13 @@ def main():
                 fail("CSV export didn't neutralise a formula")
         if not os.path.exists(api("export_report", {"drive": vid, "path": []})["file"]):
             fail("report not written")
+        pdf = api("export_pdf", {"drive": vid, "path": []})["file"]
+        with open(pdf, "rb") as f:
+            if not f.read(8).startswith(b"%PDF"):
+                fail("PDF export isn't a PDF")
+        png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        if not os.path.exists(api("export_image", {"name": "smoke", "data": png})["file"]):
+            fail("map image not written")
         print("ignore, CSV and HTML export: ok")
 
         # owner & permissions, extra locations

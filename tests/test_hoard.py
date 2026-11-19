@@ -284,6 +284,115 @@ class Updates(unittest.TestCase):
         self.assertTrue(updates.safe_to_remove(deep))
 
 
+class Automation(unittest.TestCase):
+    def test_low_space_rule(self):
+        import automation
+        GB = 1 << 30
+        rule = {"enabled": True, "percent": 10, "gb": 20}
+        self.assertTrue(automation.low_space(500 * GB, 30 * GB, rule))     # 6 % free
+        self.assertTrue(automation.low_space(100 * GB, 15 * GB, rule))     # 15 % but under 20 GB
+        self.assertFalse(automation.low_space(500 * GB, 200 * GB, rule))
+        self.assertFalse(automation.low_space(500 * GB, 1 * GB, {"enabled": False}))
+
+    def test_auto_clean_due_and_only_safe_targets(self):
+        import automation
+        now = time.time()
+        self.assertFalse(automation.auto_clean_due({"enabled": False, "last": 0}, now))
+        self.assertTrue(automation.auto_clean_due({"enabled": True, "every": "week", "last": now - 8 * 86400}, now))
+        self.assertFalse(automation.auto_clean_due({"enabled": True, "every": "week", "last": now - 2 * 86400}, now))
+        self.assertTrue(automation.auto_clean_due({"enabled": True, "every": "day", "last": now - 86400}, now))
+        ids = {s["id"] for s in automation.auto_clean_choices()}
+        self.assertNotIn("bin", ids)            # never empties the Recycle Bin on its own
+        self.assertNotIn("downloads", ids)      # never touches your own files
+        self.assertNotIn("node_modules", ids)
+
+    def test_low_space_notifies_once_a_day(self):
+        import automation
+        sent = []
+        vols = [{"id": "T", "name": "T:", "type": "fixed", "root": TMP}]
+        rule = {"lowSpace": {"enabled": True, "percent": 100, "gb": 0}}      # always "full"
+        t0 = 1_800_000_000.0
+        automation.check_low_space(vols, rule, now=t0, notify=lambda t, b: sent.append(t))
+        automation.check_low_space(vols, rule, now=t0 + 3600, notify=lambda t, b: sent.append(t))   # an hour later: quiet
+        self.assertEqual(len(sent), 1)
+        automation.check_low_space(vols, rule, now=t0 + 25 * 3600, notify=lambda t, b: sent.append(t))  # next day: again
+        self.assertEqual(len(sent), 2)
+
+
+class Exports(unittest.TestCase):
+    JPEG = bytes.fromhex("ffd8ffc000110800100020") + b"\x03" + b"\x00" * 9 + bytes.fromhex("ffd9")
+
+    def test_jpeg_size(self):
+        self.assertEqual(reports.jpeg_size(self.JPEG), (32, 16))
+
+    def test_pdf_is_well_formed(self):
+        rows = [(f"C:\\Users\\me\\folder {i} (copy)", "1.2 GB") for i in range(120)]       # forces a 2nd page
+        pdf = reports.report_pdf("Hoard: C:", "273 GB · scanned today", [("Largest folders", rows), ("Empty", [])], self.JPEG)
+        self.assertTrue(pdf.startswith(b"%PDF-1.4"))
+        self.assertTrue(pdf.rstrip().endswith(b"%%EOF"))
+        self.assertIn(b"/DCTDecode", pdf)
+        self.assertGreaterEqual(pdf.count(b"/Type /Page "), 2)
+        start = int(pdf.rsplit(b"startxref", 1)[1].split()[0])
+        self.assertTrue(pdf[start:].startswith(b"xref"))
+
+
+class CloudDupes(unittest.TestCase):
+    def test_groups_by_size_and_checksum(self):
+        lines = "\n".join([
+            "[",
+            '{"Path":"a/x.mp4","Size":5000000,"ModTime":"2024-01-01T00:00:00Z","Hashes":{"md5":"aa"}},',
+            '{"Path":"b/x copy.mp4","Size":5000000,"ModTime":"2024-02-01T00:00:00Z","Hashes":{"md5":"aa"}},',
+            '{"Path":"c/other.mp4","Size":5000000,"ModTime":"2024-01-01T00:00:00Z","Hashes":{"md5":"bb"}},',
+            '{"Path":"d/small.txt","Size":10,"ModTime":"2024-01-01T00:00:00Z","Hashes":{"md5":"cc"}}',
+            "]"])
+
+        class Fake:
+            def __init__(self, *a, **k):
+                self.stdout, self.stderr, self.returncode = io.StringIO(lines), io.StringIO(""), 0
+
+            def wait(self):
+                return 0
+
+            def kill(self):
+                pass
+        real_popen, real_exe = subprocess.Popen, cloud.exe
+        subprocess.Popen, cloud.exe = Fake, (lambda: "rclone")
+        try:
+            job = cloud.dupes_start({"id": "cloud-g", "root": "g:"}, [], 1 << 20)
+            for _ in range(100):
+                if not job["running"]:
+                    break
+                time.sleep(0.02)
+        finally:
+            subprocess.Popen, cloud.exe = real_popen, real_exe
+        self.assertIsNone(job["error"])
+        self.assertEqual(len(job["groups"]), 1)
+        self.assertEqual([f["p"] for f in job["groups"][0]["files"]], [["a", "x.mp4"], ["b", "x copy.mp4"]])
+        self.assertEqual(job["groups"][0]["files"][0]["path"], "g:a/x.mp4")
+
+
+class Desktop(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows tray")
+    def test_tray_tooltip(self):
+        import tray
+        vols = [{"id": "C", "name": "C:", "root": os.environ.get("SystemDrive", "C:") + "\\"}]
+        tip = tray.tooltip_text(vols, [{"vol": "C", "time": time.time(), "delta": 2 << 30}])
+        self.assertTrue(tip.startswith("Hoard"))
+        self.assertIn("+2.0 GB today", tip)
+        self.assertLessEqual(len(tip), 127)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux file-manager scripts")
+    def test_linux_context_menu(self):
+        os.environ["XDG_DATA_HOME"] = os.path.join(TMP, "xdg")
+        os.environ["HOME_SAVE"] = os.environ.get("HOME", "")
+        ok, err = plat.context_menu_install(["/opt/hoard/hoard"])
+        self.assertTrue(ok, err)
+        self.assertTrue(plat.context_menu_status())
+        with open(os.path.join(TMP, "xdg", "nautilus", "scripts", "Open in Hoard")) as f:
+            self.assertIn("--open", f.read())
+        plat.context_menu_remove()
+
+
 class Misc(unittest.TestCase):
     def test_csv_formula_neutralised(self):
         self.assertEqual(reports.safe_cell("=HYPERLINK(1)"), "'=HYPERLINK(1)")

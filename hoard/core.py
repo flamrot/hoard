@@ -410,6 +410,10 @@ DEFAULTS = {"schedule": {"enabled": False, "time": "07:00", "volumes": []},
             "fastScan": False,     # Windows: read the NTFS file table directly (needs admin)
             "scheduleFast": False,  # Windows: the daily scan runs with admin rights and uses the fast scan
             "updateCheck": True,   # look for a newer release on GitHub at most once a day
+            "lowSpace": {"enabled": True, "percent": 10, "gb": 20},       # alert when a drive gets this full
+            "autoClean": {"enabled": False, "every": "week", "ids": ["temp", "crash", "shader"], "last": 0},
+            "tray": False,         # Windows: tray icon at sign-in
+            "contextMenu": False,  # "Open in Hoard" in the file manager's right-click menu
             "updateUrl": "https://api.github.com/repos/flamrot/hoard/releases/latest"}
 
 

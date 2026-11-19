@@ -435,6 +435,46 @@ def file_info(path):
     return {"owner": _owner_sid(path) or "Unknown", "attrs": attrs, "perms": perms}
 
 
+_CM_KEYS = [(r"Software\Classes\Directory\shell\Hoard", '"%1"'),
+            (r"Software\Classes\Drive\shell\Hoard", '"%1"'),
+            (r"Software\Classes\Directory\Background\shell\Hoard", '"%V"')]
+
+
+def context_menu_install(argv):
+    """'Open in Hoard' when right-clicking a folder, a drive, or the empty space inside a folder (this account only)."""
+    import winreg
+    try:
+        for key, arg in _CM_KEYS:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "Open in Hoard")
+                winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, argv[0])
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key + r"\command") as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, subprocess.list2cmdline(argv + ["--open"]) + " " + arg)
+        return True, None
+    except OSError as ex:
+        return False, str(ex)
+
+
+def context_menu_remove():
+    import winreg
+    for key, _ in _CM_KEYS:
+        for k in (key + r"\command", key):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, k)
+            except OSError:
+                pass
+    return True, None
+
+
+def context_menu_status():
+    import winreg
+    try:
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, _CM_KEYS[0][0] + r"\command"))
+        return True
+    except OSError:
+        return False
+
+
 def app_browsers():
     cands = [
         os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft\\Edge\\Application\\msedge.exe"),

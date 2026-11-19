@@ -501,6 +501,19 @@ dialog.wide { width: min(580px, calc(100% - 32px)); max-height: calc(100vh - 48p
 dialog.xl { width: min(900px, calc(100% - 32px)); }
 
 main[hidden], .toolbar[hidden], .tabs button[hidden] { display: none; }
+.detail { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); flex: none; }
+.detail span { font-size: 12px; color: var(--ink-3); padding: 0 6px 0 4px; }
+.detail button { border: 0; background: none; padding: 4px 9px; border-radius: 6px; cursor: pointer; color: var(--ink-2); font-size: 12.5px; }
+.detail button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+#maptip {
+  position: absolute; left: 16px; bottom: 16px; z-index: 3; max-width: 380px; display: grid; gap: 6px;
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow);
+  color: var(--ink-2); font-size: 13px; animation: up .25s ease-out;
+}
+#maptip[hidden] { display: none; }
+#maptip > b { color: var(--ink); font-size: 14px; }
+#maptip .btn { justify-self: start; margin-top: 4px; }
+#status { display: none; }
 
 /* ---------- simple mode */
 .simpletoggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; color: var(--ink-2); font-weight: 500; user-select: none; }
@@ -602,6 +615,10 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>
   </button>
   <div id="crumbs"></div>
+  <div class="detail" role="group" aria-label="Map detail" title="How much detail the map shows">
+    <span>Detail</span>
+    <button data-detail="low">Low</button><button data-detail="medium">Medium</button><button data-detail="high">High</button>
+  </div>
   <div class="search" id="searchBox">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg>
     <input id="q" type="search" placeholder="Search…" aria-label="Search names in this folder (Ctrl+F)" autocomplete="off" spellcheck="false">
@@ -624,6 +641,12 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
   <div id="map" aria-label="Disk space map">
     <canvas id="cv"></canvas>
     <canvas id="ov" role="img" aria-label="Treemap of folder sizes. The list in the side panel shows the same data."></canvas>
+    <div id="maptip" hidden>
+      <b>How to read the map</b>
+      <span>Every block is a folder or file. The bigger the block, the more space it uses. Colours show the kind of file.</span>
+      <span><b>Double-click</b> a folder to look inside · <b>Backspace</b> to go back · <b>right-click</b> for options.</span>
+      <button class="btn primary" id="maptipOk">Got it</button>
+    </div>
     <div id="state"></div>
   </div>
   <aside>
@@ -755,6 +778,10 @@ const S = { drives: [], drive: null, os: "windows", sep: "\\", trashName: "Recyc
             focusCat: null, rects: [], hover: null, lists: {}, scanning: false,
             mode: "map", colorBy: "type", ages: null, staged: { items: [], total: 0 }, ignore: {}, watch: [], hiddenNote: "" };
 
+/* how much of the tree the map draws: Low = a few dozen big blocks, High = everything */
+const DETAIL = { low: { depth: 3, min: .012 }, medium: { depth: 5, min: .003 }, high: { depth: 8, min: .0004 } };
+try { S.detail = localStorage.getItem("hoard.detail") || "low"; } catch { S.detail = "low"; }
+
 /* bucket a modification time the same way the server does */
 function ageBucket(t) {
   if (!t) return 5;
@@ -782,7 +809,7 @@ function readColors() {
   C = { surface: v("--surface"), f1: v("--frame-1"), f2: v("--frame-2"), ink: v("--ink"), ink2: v("--ink-2"), ink3: v("--ink-3"),
         accent: v("--accent"), ring: v("--ring"), cats: [0,1,2,3,4,5,6,7,8].map(i => v("--c" + i)), font: v("--font") };
   const p = document.createElement("canvas"); p.width = p.height = 8;
-  const pc = p.getContext("2d"); pc.strokeStyle = C.ink3; pc.globalAlpha = .35; pc.lineWidth = 1;
+  const pc = p.getContext("2d"); pc.strokeStyle = C.ink3; pc.globalAlpha = .16; pc.lineWidth = 1;
   pc.beginPath(); pc.moveTo(0, 8); pc.lineTo(8, 0); pc.moveTo(-2, 2); pc.lineTo(2, -2); pc.moveTo(6, 10); pc.lineTo(10, 6); pc.stroke();
   C.hatch = ctx.createPattern(p, "repeat");
 }
@@ -912,9 +939,12 @@ function drawLeaf(r) {
     ctx.textBaseline = "top";
     ctx.font = "600 12px " + C.font;
     const t = fit(ctx, n.n, w - 14);
-    if (t) {
-      ctx.fillText(t, x + 7, y + 6);
-      if (h >= 36) { ctx.font = "12px " + C.font; ctx.globalAlpha = dim ? .1 : .82; ctx.fillText(fit(ctx, fmt(n.s), w - 14), x + 7, y + 21); }
+    const big = w > 150 && h > 70;          // roomy blocks get bigger, easier labels
+    if (big) { ctx.font = "600 14px " + C.font; }
+    const tb = big ? fit(ctx, n.n, w - 18) : t;
+    if (tb) {
+      ctx.fillText(tb, x + (big ? 10 : 7), y + (big ? 9 : 6));
+      if (h >= 36) { ctx.font = (big ? "13px " : "12px ") + C.font; ctx.globalAlpha = dim ? .1 : .82; ctx.fillText(fit(ctx, fmt(n.s), w - 14), x + (big ? 10 : 7), y + (big ? 28 : 21)); }
     }
   }
   ctx.globalAlpha = 1;
@@ -1007,7 +1037,8 @@ ov.addEventListener("contextmenu", e => {
 let navToken = 0;
 async function loadView(path, opts = {}) {
   const my = ++navToken;
-  const req = api("view", { drive: S.drive, path });
+  const det = DETAIL[S.detail] || DETAIL.low;
+  const req = api("view", { drive: S.drive, path, depth: det.depth, minFrac: det.min });
   tip.style.display = "none"; S.hover = null;
   if (opts.fromRect && !reduced && S.view) await zoomInFx(opts.fromRect);
   let r;
@@ -1034,6 +1065,7 @@ async function loadView(path, opts = {}) {
   drawOverlay(); renderAll();
   if (S.searchRes) runSearch();
   if (S.mode === "simple") renderSimple();
+  maybeTip();
 }
 function zoomInto(path, rect) { closeMenu(); return loadView(path, { fromRect: rect }); }
 function goUp() {
@@ -1083,6 +1115,7 @@ function renderStatus() {
   btn.querySelector("span").textContent = S.scanning ? "Scanning…" : S.meta?.has ? `Rescan ${vol().name}` : S.drive ? `Scan ${vol().name}` : "Scan";
   st.textContent = S.scanning ? "" : S.meta?.has ? `Last scanned ${ago(S.meta.time)}` : "";
   st.title = S.meta?.time ? new Date(S.meta.time * 1000).toLocaleString() : "";
+  btn.title = S.meta?.time ? `Last scanned ${ago(S.meta.time)} (${new Date(S.meta.time * 1000).toLocaleString()})` : "";
 }
 function renderCrumbs() {
   const el = $("#crumbs"); el.innerHTML = "";
@@ -1106,14 +1139,11 @@ function renderCrumbs() {
       `<option value="${h.ts}" ${h.ts === S.meta.prevTime ? "selected" : ""}>${esc(when(h.ts))}${h.total ? " · " + fmt(h.total) : ""}${h.partial ? " (summary)" : ""}</option>`).join("")}</select></label>`;
   }
   if (S.view.ign) html += `<button class="chip note" id="ignChip" style="border:0;cursor:pointer" title="Folders on your ignore list are left out of the map and lists. Manage them in Settings.">${fmt(S.view.ign)} ignored</button>`;
-  if (S.view.hidden) html += `<span class="chip note" title="${esc(S.hiddenNote)}">${fmt(S.view.hidden)} not visible to the scan ⓘ</span>`;
-  if (S.view.cl && !S.path.length) html += `<span class="chip note" title="Online-only files from OneDrive, iCloud or Google Drive for desktop. They're in the cloud, not on this disk, so the map leaves them out.">+ ${fmt(S.view.cl)} online-only</span>`;
   if (isCloudVol() && !S.path.length) {
     const v = vol();
     if (v.other) html += `<span class="chip note" title="Gmail and Google Photos share this storage quota but aren't files Hoard can list">${fmt(v.other)} in Gmail &amp; Photos</span>`;
     if (v.trashed) html += `<button class="chip note" id="cloudTrashChip" style="border:0;cursor:pointer" title="Deleted files still count against your storage. Click to see it in Clean up.">${fmt(v.trashed)} in trash</button>`;
   }
-  html += deltaHTML(S.view);
   html += `<span class="total num">${fmt(S.view.s)}</span>`;
   vs.innerHTML = html;
   const ic = $("#ignChip"); if (ic) ic.onclick = openSettings;
@@ -1144,6 +1174,7 @@ function renderSel() {
     <div class="spath">${esc(fullPath(path))}</div>
     <div class="ssize"><b class="num">${fmt(n.s)}</b><span class="num">${pct}</span></div>
     <div class="smeta">${n.k === "d" && n.f ? `<span class="chip num">${n.f.toLocaleString()} files</span>` : ""}${deltaHTML(n)}${ageChip}
+      ${isView && !path.length && S.view.hidden ? `<span class="chip" title="${esc(S.hiddenNote)}">${fmt(S.view.hidden)} not visible to the scan ⓘ</span>` : ""}
       ${n.cl ? `<span class="chip" title="Online-only files (OneDrive, iCloud, Google Drive for desktop…) are in the cloud, not on this disk, so they aren't counted above">${ICON.cloud.replace("margin-right:5px", "margin-right:2px").replace(/15px/g, "12px")}+ ${fmt(n.cl)} online-only</span>` : ""}
       ${w ? `<span class="chip grow" title="You'll get a notification after a daily scan if it passes this size">${ICON.bell.replace("<svg", '<svg style="width:12px;height:12px"')} alert at ${w.gb} GB</span>` : ""}</div>
     ${n.k !== "f" ? `<div class="trend" id="trend"></div>` : ""}
@@ -1640,7 +1671,7 @@ function setMode(m) {
   if (m === "dupes") renderDupes();
   if (m === "apps") renderApps();
   if (m === "simple") renderSimple();
-  if (isMap) requestAnimationFrame(() => { sizeCanvas(); if (S.view) { layout(); draw(); drawOverlay(); } });
+  if (isMap) requestAnimationFrame(() => { sizeCanvas(); if (S.view) { layout(); draw(); drawOverlay(); } maybeTip(); });
 }
 document.querySelectorAll(".views button").forEach(b => b.onclick = () => setMode(b.dataset.view));
 
@@ -1657,9 +1688,9 @@ function renderStageBtn() {
   $("#stageLabel").textContent = n ? fmt(S.staged.total) : "Staged";
 }
 function bump() { const b = $("#stageBtn"); b.classList.remove("bump"); void b.offsetWidth; b.classList.add("bump"); }
-async function stage(items, absItems) {
+async function stage(items, absItems, vid = S.drive) {
   try {
-    const r = absItems ? await api("stage_add", { abs: absItems }) : await api("stage_add", { drive: S.drive, items });
+    const r = absItems ? await api("stage_add", { abs: absItems }) : await api("stage_add", { drive: vid, items });
     S.staged = r; renderStageBtn(); bump();
     const list = absItems || items;
     if (!r.added) toast("Already in the staging area");
@@ -1844,11 +1875,32 @@ async function renderTypes(el, key) {
 /* ------------------------------------------------------------------ export */
 $("#exportBtn").onclick = e => {
   const r = e.currentTarget.getBoundingClientRect();
-  popMenu(r.left - 120, r.bottom + 4, [
+  popMenu(r.left - 160, r.bottom + 4, [
+    { label: "Report with the map (PDF)", icon: ICON.open, run: exportPDF },
+    { label: "Map as an image (PNG)", icon: ICON.eye, run: exportImage },
+    "-",
     { label: "This list as CSV (for Excel)", icon: ICON.copy, run: exportCSV },
     { label: "Report for this folder (HTML)", icon: ICON.open, run: exportReport },
   ]);
 };
+function mapImage(type, q) {
+  // draw the map onto a white-or-dark backed copy so the image doesn't depend on the page behind it
+  const c = document.createElement("canvas"); c.width = cv.width; c.height = cv.height;
+  const g = c.getContext("2d"); g.fillStyle = C.surface; g.fillRect(0, 0, c.width, c.height); g.drawImage(cv, 0, 0);
+  return c.toDataURL(type, q);
+}
+async function exportImage() {
+  if (!S.view) return;
+  try { const r = await api("export_image", { name: `Hoard map ${vol().name.replace(/[:\\/]/g, "")}`, data: mapImage("image/png") });
+        if (r.error) toast(r.error, "error"); else toast("Saved the map to Downloads", "ok", r.file); }
+  catch (e) { toast(e.message, "error"); }
+}
+async function exportPDF() {
+  if (!S.view) return;
+  try { const r = await api("export_pdf", { drive: S.drive, path: S.path, image: S.mode === "map" ? mapImage("image/jpeg", .9) : null });
+        if (r.error) toast(r.error, "error"); else toast("Saved the PDF report to Downloads", "ok", r.file); }
+  catch (e) { toast(e.message, "error"); }
+}
 async function exportCSV() {
   if (!S.view) return;
   const tab = S.tab, key = S.drive + "|" + S.path.join("\\");
@@ -2017,7 +2069,9 @@ async function renderDupes() {
   const scope = j?.scope || { drive: S.drive, path: S.path };
   const canStart = S.drive && S.meta?.has;
   p.innerHTML = `<div class="pwrap">
-    <div class="phead"><div><h2>Duplicate files</h2><p>Finds files with exactly the same contents, compared byte by byte, so you can keep one copy. Hard links to the same file aren't counted.</p></div>
+    <div class="phead"><div><h2>Duplicate files</h2><p>${volOf(scope.drive)?.type === "cloud"
+      ? "Finds files with exactly the same contents using the checksums your cloud already stores, so nothing is downloaded."
+      : "Finds files with exactly the same contents, compared byte by byte, so you can keep one copy. Hard links to the same file aren't counted."}</p></div>
       ${j?.groups ? `<div class="ptotal num">${fmt(j.groups.reduce((a, g) => a + g.wasted, 0))}<small>taken up by extra copies</small></div>` : ""}</div>
     <div class="ptools">
       <span>Look in <b>${esc(canStart ? absPath(scope.drive, scope.path) : "—")}</b></span>
@@ -2062,27 +2116,27 @@ function drawDupeBody() {
   if (j.error) { b.innerHTML = `<div class="empty">${esc(j.error)}</div>`; return; }
   if (j.cancelled) { b.innerHTML = `<div class="empty"><b>Stopped</b>Start again any time.</div>`; return; }
   if (!j.groups?.length) { b.innerHTML = `<div class="empty"><b>No duplicates found</b>No two files of this size or larger have the same contents here.</div>`; return; }
-  const vid = j.vol || j.scope.drive;
+  const vid = j.vol || j.scope.drive, cloudDup = volOf(vid)?.type === "cloud";
   b.innerHTML = `<div class="ptools" style="margin-bottom:12px"><button class="btn primary" id="dKeepNew">${ICON.stage}Stage every extra copy (keep the newest)</button>
       <button class="btn" id="dKeepOld">Keep the oldest instead</button></div>`
     + j.groups.slice(0, 300).map((g, gi) => `<div class="dgroup"><div class="gh"><div><b>${g.files.length} copies</b> <span>· ${fmt(g.size)} each · ${fmt(g.wasted)} extra</span></div>
         <div style="display:flex;gap:6px"><button class="btn" data-keep="${gi}|new">Keep newest</button><button class="btn" data-keep="${gi}|old">Keep oldest</button></div></div>
         ${g.files.map((f, fi) => `<div class="cand" style="grid-template-columns:minmax(0,1fr) auto auto"><span class="cp" title="${esc(f.path)}">${esc(f.path)}<small>${dateStr(f.m)}</small></span>
-          <button class="btn ghost icon" data-pv="${gi}|${fi}" title="Preview">${ICON.eye}</button><button class="btn ghost icon" data-st="${gi}|${fi}" title="Stage this copy">${ICON.stage}</button></div>`).join("")}</div>`).join("");
+          ${cloudDup ? "" : `<button class="btn ghost icon" data-pv="${gi}|${fi}" title="Preview">${ICON.eye}</button>`}<button class="btn ghost icon" data-st="${gi}|${fi}" title="Stage this copy">${ICON.stage}</button></div>`).join("")}</div>`).join("");
   const stageCopies = (groups, keepNewest) => {
     const picks = [];
     for (const g of groups) {
       const keep = keepNewest ? g.files.reduce((a, f) => f.m > a.m ? f : a) : g.files.reduce((a, f) => f.m < a.m ? f : a);
-      g.files.filter(f => f !== keep).forEach(f => picks.push({ path: f.path, name: f.p[f.p.length - 1], size: g.size, kind: "f", c: g.c }));
+      g.files.filter(f => f !== keep).forEach(f => picks.push({ path: f.p, name: f.p[f.p.length - 1], size: g.size, kind: "f", c: g.c }));
     }
-    if (picks.length) stage(null, picks);
+    if (picks.length) stage(picks, null, vid);
   };
   $("#dKeepNew").onclick = () => stageCopies(j.groups, true);
   $("#dKeepOld").onclick = () => stageCopies(j.groups, false);
   b.querySelectorAll("[data-keep]").forEach(x => x.onclick = () => { const [gi, k] = x.dataset.keep.split("|"); stageCopies([j.groups[+gi]], k === "new"); });
   b.querySelectorAll("[data-st]").forEach(x => x.onclick = () => {
     const [gi, fi] = x.dataset.st.split("|").map(Number), g = j.groups[gi], f = g.files[fi];
-    stage(null, [{ path: f.path, name: f.p[f.p.length - 1], size: g.size, kind: "f", c: g.c }]);
+    stage([{ path: f.p, name: f.p[f.p.length - 1], size: g.size, kind: "f", c: g.c }], null, vid);
   });
   b.querySelectorAll("[data-pv]").forEach(x => x.onclick = () => {
     const [gi, fi] = x.dataset.pv.split("|").map(Number), g = j.groups[gi], f = g.files[fi];
@@ -2172,6 +2226,41 @@ async function uninstallApp(a) {
   if (r.error) toast(r.error, "error"); else toast(`Started the uninstaller for ${a.name}`, "ok", "Press Refresh here when it's finished.");
 }
 
+/* ------------------------------------------------------------------ "Open in Hoard" from the file manager */
+async function openFromFileManager(path, fallback) {
+  let r;
+  try { r = await api("locate", { abs: path }); } catch (e) { toast(e.message, "error"); return selectDrive(fallback); }
+  if (r.error) { toast(r.error, "error"); return selectDrive(fallback); }
+  if (r.drive && r.scanned) {                       // already in a scan: jump straight there
+    await selectDrive(r.drive);
+    if (r.kind === "d") await loadView(r.parts);
+    else jumpTo({ p: r.parts, s: 0, k: "f", c: 8 });
+    return;
+  }
+  const a = await api("add_location", { path: r.path || path });   // not scanned yet: map just that folder
+  if (a.error) { toast(a.error, "error"); return selectDrive(fallback); }
+  await refreshDrives();
+  await selectDrive(a.id);
+  if (!S.meta?.has) startScan();
+}
+
+/* ------------------------------------------------------------------ map detail + first-time tip */
+function renderDetail() { document.querySelectorAll("[data-detail]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.detail === S.detail))); }
+document.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => {
+  if (S.detail === b.dataset.detail) return;
+  S.detail = b.dataset.detail;
+  try { localStorage.setItem("hoard.detail", S.detail); } catch { /* private mode */ }
+  renderDetail();
+  if (S.view) loadView(S.path, { force: true });
+});
+renderDetail();
+function maybeTip() {
+  let seen = false;
+  try { seen = localStorage.getItem("hoard.tipSeen") === "1"; } catch { /* private mode */ }
+  $("#maptip").hidden = seen || S.mode !== "map" || !S.view;
+}
+$("#maptipOk").onclick = () => { try { localStorage.setItem("hoard.tipSeen", "1"); } catch { /* */ } $("#maptip").hidden = true; };
+
 /* ------------------------------------------------------------------ simple mode */
 function setSimple(on) {
   S.simple = on;
@@ -2202,6 +2291,7 @@ async function renderSimple() {
   const d = S.drives.find(x => x.id === S.drive) || vol();
   const pct = d.total ? d.used / d.total : 0;
   const [cls, verdict] = pct > .9 ? ["hot", "Almost full"] : pct > .75 ? ["warn", "Getting full"] : ["", "Plenty of space"];
+  if (!S.meta) { p.innerHTML = `<div class="simple-wrap"><div class="loading" style="justify-content:center;padding:60px">${SPIN}Opening ${esc(d.name || "")}…</div></div>`; return; }
   const checked = S.meta?.time ? `Last checked ${ago(S.meta.time)}` : "Not checked yet";
   const hero = `<div class="scard hero"><div>
       <div style="color:var(--ink-3);font-weight:600">${esc(d.name)} ${esc(d.type === "cloud" ? "" : d.label || "")}</div>
@@ -2513,6 +2603,20 @@ async function openSettings() {
       <select id="stNotify">${opt([0, 0.5, 1, 2, 5, 10], st.notifyGB, v => +v ? (v < 1 ? v * 1000 + " MB" : v + " GB") : "Never")}</select></div></section>
     <section class="set"><div class="set-row"><div><b>Keep scan history</b><small>Older scans are deleted automatically. Saved scans now use ${fmt(r.storage)}.</small></div>
       <select id="stKeep">${opt([7, 14, 30, 60, 90], st.keep, v => v + " scans")}</select></div></section>
+    <section class="set"><div class="set-row"><div><b>Warn me when a drive is almost full</b><small>A notification (at most once a day per drive) after the daily check${S.os === "windows" ? " or from the tray icon" : ""}.</small></div>
+      <label class="switch"><input type="checkbox" id="stLow" ${st.lowSpace?.enabled ? "checked" : ""} aria-label="Low space warning"><span></span></label></div>
+      <div class="field" style="margin-top:10px"><span style="width:auto">When less than</span>
+        <input type="number" id="stLowPct" min="0" max="50" value="${st.lowSpace?.percent ?? 10}" style="width:64px;height:30px;border-radius:6px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--ink);font:inherit;padding:0 6px"> % or
+        <input type="number" id="stLowGb" min="0" value="${st.lowSpace?.gb ?? 20}" style="width:72px;height:30px;border-radius:6px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--ink);font:inherit;padding:0 6px"> GB is free</div></section>
+    <section class="set"><div class="set-row"><div><b>Clean up automatically</b><small>Clears only the caches and temporary files you tick, after the daily check. Your own files are never touched.${st.autoClean?.last ? ` Last run ${esc(ago(st.autoClean.last))}.` : ""}</small></div>
+      <label class="switch"><input type="checkbox" id="stAuto" ${st.autoClean?.enabled ? "checked" : ""} aria-label="Clean up automatically"><span></span></label></div>
+      <div class="field" style="margin-top:10px"><span style="width:auto">Every</span><select id="stAutoEvery"><option value="week" ${st.autoClean?.every !== "day" ? "selected" : ""}>week</option><option value="day" ${st.autoClean?.every === "day" ? "selected" : ""}>day</option></select></div>
+      <div class="checks" style="margin-top:10px">${(r.cleanChoices || []).map(c => `<label><input type="checkbox" data-auto="${esc(c.id)}" ${(st.autoClean?.ids || []).includes(c.id) ? "checked" : ""}>${esc(c.title)}</label>`).join("")}</div></section>
+    ${S.os === "windows" || r.contextMenuSupported ? `<section class="set">
+      ${S.os === "windows" ? `<div class="set-row"><div><b>Tray icon</b><small>Free space at a glance next to the clock, low-space warnings, and quick access. Starts when you sign in.</small></div>
+        <label class="switch"><input type="checkbox" id="stTray" ${st.tray ? "checked" : ""} aria-label="Tray icon"><span></span></label></div>` : ""}
+      ${r.contextMenuSupported ? `<div class="set-row" style="margin-top:12px"><div><b>“Open in Hoard” when you right-click a folder</b><small>${S.os === "windows" ? "In File Explorer (on Windows 11, under “Show more options”)." : "In Files/Nautilus, Nemo and Caja (Scripts menu) and Dolphin."}</small></div>
+        <label class="switch"><input type="checkbox" id="stCtx" ${r.contextMenu ? "checked" : ""} aria-label="Right-click menu"><span></span></label></div>` : ""}</section>` : ""}
     <section class="set"><div class="set-row"><div><b>Save a report after each daily scan</b><small>An HTML page listing what grew and the largest folders and files, saved to ${esc(st.reportDir || r.defaultReportDir)}.</small></div>
       <label class="switch"><input type="checkbox" id="stReport" ${st.reportDir ? "checked" : ""} aria-label="Save a report after each daily scan"><span></span></label></div>
       ${st.reportDir ? `<button class="btn" id="stOpenReports" style="margin-top:10px">Open reports folder</button>` : ""}</section>
@@ -2547,6 +2651,16 @@ async function openSettings() {
     d.querySelectorAll("[data-w]").forEach(b => b.onclick = () => { watch.splice(+b.dataset.w, 1); drawLists(); });
   };
   drawLists();
+  const tr = $("#stTray");
+  if (tr) tr.onchange = async () => {
+    const x = await api("tray", { on: tr.checked }).catch(e => ({ error: e.message }));
+    if (x.error) { toast(x.error, "error"); tr.checked = !tr.checked; } else toast(tr.checked ? "Tray icon is on" : "Tray icon is off");
+  };
+  const cx = $("#stCtx");
+  if (cx) cx.onchange = async () => {
+    const x = await api("context_menu", { on: cx.checked }).catch(e => ({ error: e.message }));
+    if (x.error) { toast(x.error, "error"); cx.checked = x.on; } else toast(cx.checked ? "Added “Open in Hoard” to the right-click menu" : "Removed it from the right-click menu");
+  };
   $("#updCheck").onclick = async () => {
     $("#updLine").textContent = "Checking…";
     const u = await api("update_check", { force: true }).catch(e => ({ error: e.message }));
@@ -2577,7 +2691,10 @@ async function openSettings() {
       ignore: ign, watch, reportDir: $("#stReport").checked ? (st.reportDir || r.defaultReportDir) : "",
       fastScan: $("#stFast") ? $("#stFast").checked : false,
       scheduleFast: $("#stSchedFast") ? $("#stSchedFast").checked : false,
-      updateCheck: $("#stUpd").checked } };
+      updateCheck: $("#stUpd").checked,
+      lowSpace: { enabled: $("#stLow").checked, percent: +$("#stLowPct").value, gb: +$("#stLowGb").value },
+      autoClean: { enabled: $("#stAuto").checked, every: $("#stAutoEvery").value,
+                   ids: [...d.querySelectorAll("[data-auto]:checked")].map(x => x.dataset.auto) } } };
     btn.disabled = true; err.hidden = true;
     try {
       const res = await api("save_settings", body);
@@ -2607,7 +2724,10 @@ addEventListener("pagehide", () => navigator.sendBeacon("/api/bye", TOKEN));
   const sys = (running.running && S.drives.find(d => d.id === running.drive))
     || S.drives.find(d => d.id === "C" || d.id === "root") || S.drives[0];
   if (!sys) return showStateMessage("No disks found", "Hoard couldn't find any disks it can read.");
-  try { if (localStorage.getItem("hoard.simple") === "1") setSimple(true); } catch { /* private mode */ }
+  const openPath = new URLSearchParams(location.search).get("open");
+  // Simple mode is where Hoard starts, unless you've switched it off (or you opened a folder from the right-click menu)
+  if (!openPath) { try { if (localStorage.getItem("hoard.simple") !== "0") setSimple(true); } catch { setSimple(true); } }
+  if (openPath) { await openFromFileManager(openPath, sys.id); return; }
   await selectDrive(sys.id);
   if (running.running) {            // the window was reloaded mid-scan: pick the scan back up
     S.scanning = true; S.scanMin = !!S.view; S.lastProg = running;

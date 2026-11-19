@@ -361,6 +361,53 @@ def run_uninstall(app):
     return False, "Run the command shown in a terminal."
 
 
+def _script_dirs():
+    D = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return [os.path.join(D, "nautilus", "scripts"), os.path.join(D, "nemo", "scripts"),
+            os.path.expanduser("~/.config/caja/scripts")]
+
+
+def _kde_menu():
+    D = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(D, "kio", "servicemenus", "hoard.desktop")
+
+
+def context_menu_install(argv):
+    """'Open in Hoard' in Nautilus/Nemo/Caja (Scripts submenu) and Dolphin (service menu)."""
+    cmd = " ".join(quote_sh(a) for a in argv)
+    script = ("#!/bin/sh\n# Hoard: open the selected folder (or the current one)\n"
+              'p="$1"\n[ -z "$p" ] && p="$PWD"\ncase "$p" in /*) ;; *) p="$PWD/$p" ;; esac\n'
+              f'exec {cmd} --open "$p"\n')
+    try:
+        for d in _script_dirs():
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, "Open in Hoard")
+            with open(p, "w") as f:
+                f.write(script)
+            os.chmod(p, 0o755)
+        os.makedirs(os.path.dirname(_kde_menu()), exist_ok=True)
+        with open(_kde_menu(), "w") as f:
+            f.write("[Desktop Entry]\nType=Service\nMimeType=inode/directory;\nActions=openHoard\nX-KDE-Priority=TopLevel\n\n"
+                    f"[Desktop Action openHoard]\nName=Open in Hoard\nIcon=hoard\nExec={cmd} --open %f\n")
+        os.chmod(_kde_menu(), 0o755)
+        return True, None
+    except OSError as ex:
+        return False, str(ex)
+
+
+def context_menu_remove():
+    for p in [os.path.join(d, "Open in Hoard") for d in _script_dirs()] + [_kde_menu()]:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return True, None
+
+
+def context_menu_status():
+    return os.path.exists(_kde_menu()) or any(os.path.exists(os.path.join(d, "Open in Hoard")) for d in _script_dirs())
+
+
 def app_browsers():
     from . import which_all
     return which_all(["google-chrome", "google-chrome-stable", "chromium", "chromium-browser",

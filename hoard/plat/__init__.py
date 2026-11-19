@@ -45,6 +45,9 @@ cleanup_specs = _os.cleanup_specs          # () -> [cleanup target dicts], see c
 installed_apps = _os.installed_apps        # () -> [app dicts], see apps.py
 run_uninstall = _os.run_uninstall          # (app) -> (ok, error)
 HIDDEN_NOTE = _os.HIDDEN_NOTE              # why "used" space can exceed what the scan sees
+context_menu_install = _os.context_menu_install   # (argv) -> (ok, error): "Open in Hoard" in the file manager
+context_menu_remove = _os.context_menu_remove
+context_menu_status = _os.context_menu_status
 
 
 def file_info(path):

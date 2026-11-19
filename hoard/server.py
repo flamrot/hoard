@@ -320,6 +320,12 @@ def headless_scan(ids=None):
                     save_report(vid, v, tree, now, prev, before[0] if before else None, ch, settings["reportDir"])
                 except OSError as ex:
                     core.log_error("saving report", str(ex))
+        try:                                  # after the scans: auto-clean (if due) and low-space alerts
+            import automation
+            automation.run_auto_clean(core.load_settings())
+            automation.check_low_space(list(vols.values()), core.load_settings())
+        except Exception as ex:  # noqa: BLE001
+            core.log_error("automation", str(ex))
     finally:
         try:
             os.remove(lock)
@@ -807,7 +813,8 @@ class Handler(BaseHTTPRequestHandler):
             if node is None or f is not None:
                 return {"missing": True}
             pn = walk_prev(s, parts)
-            v = view_json(node, pn, s["prev_partial"], int(b.get("depth", 8)), max(1, node.size * 0.0004),
+            frac = min(0.05, max(0.0001, float(b.get("minFrac", 0.0004))))     # the map's detail level
+            v = view_json(node, pn, s["prev_partial"], max(1, min(8, int(b.get("depth", 8)))), max(1, node.size * frac),
                           tuple(parts), ign)
             v["cats"] = list(node.cats)
             if not parts and not s["cur_partial"] and VOLS.get(vid, {}).get("type") in ("fixed", "removable"):
@@ -1016,11 +1023,54 @@ class Handler(BaseHTTPRequestHandler):
             return {"error": "That folder doesn't exist, or Hoard can't open it."}
         st = core.load_settings()
         if any(os.path.normcase(l["path"]) == os.path.normcase(path) for l in st["locations"]):
-            return {"error": "That location is already on the list."}
+            return {"ok": True, "id": location_volume(path)["id"], "existing": True}
         st["locations"].append({"path": path, "name": (b.get("name") or "").strip() or None})
         core.save_settings(st)
         volumes()
         return {"ok": True, "id": location_volume(path)["id"]}
+
+    def api_locate(self, b):
+        """Where is this folder or file? (for 'Open in Hoard' from the file manager)"""
+        path = os.path.abspath(os.path.expanduser((b.get("abs") or "").strip().strip('"')))
+        if not os.path.exists(path):
+            return {"error": "That folder doesn't exist anymore."}
+        volumes()
+        best = None
+        for vid, v in VOLS.items():
+            if v["type"] == "cloud":
+                continue
+            parts = core.rel_parts(v["root"], path)
+            if parts is not None and (best is None or len(v["root"]) > len(VOLS[best[0]]["root"])):
+                best = (vid, parts)
+        if best is None:
+            return {"none": True, "path": path}
+        vid, parts = best
+        node = None
+        if list_snaps(vid):
+            n, f = walk(drive_state(vid)["cur"], parts)
+            node = f or n
+        return {"drive": vid, "parts": parts, "scanned": node is not None, "kind": "d" if os.path.isdir(path) else "f",
+                "path": path}
+
+    def api_context_menu(self, b):
+        if b.get("on"):
+            ok, err = plat.context_menu_install(plat.self_command())
+        else:
+            ok, err = plat.context_menu_remove()
+        st = core.load_settings()
+        st["contextMenu"] = bool(b.get("on")) and ok
+        core.save_settings(st)
+        return {"ok": ok, "error": err, "on": plat.context_menu_status()}
+
+    def api_tray(self, b):
+        if plat.NAME != "windows":
+            return {"error": "The tray icon is Windows-only; low-space alerts still come with the daily check."}
+        import tray
+        ok, err = tray.set_autostart(bool(b.get("on")))
+        st = core.load_settings()
+        st["tray"] = bool(b.get("on")) and ok
+        core.save_settings(st)
+        return {"ok": ok, "error": err}
 
     def api_remove_location(self, b):
         st = core.load_settings()
@@ -1138,11 +1188,13 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- duplicates
     def api_dupes_start(self, b):
         vid = b["drive"]
-        if is_cloud(vid):
-            return {"error": "Duplicate search works on disks and folders on this computer, not on cloud drives yet."}
         j = JOB["dupes"]
         if j and j["running"]:
             j["cancel"] = True
+        if is_cloud(vid):
+            JOB["dupes"] = cloud.dupes_start(vol(vid), clean_parts(b.get("path") or []),
+                                             int(float(b.get("minMB") or 10) * (1 << 20)))
+            return {"ok": True, "candidates": 0, "cloud": True}
         s = drive_state(vid)
         parts = b.get("path") or []
         node, _ = walk(s["cur"], parts)
@@ -1248,10 +1300,64 @@ class Handler(BaseHTTPRequestHandler):
             plat.reveal(path)
         return {"file": path}
 
+    def _export_dir(self):
+        return os.environ.get("HOARD_EXPORT_DIR") or plat.downloads_dir()
+
+    def _saved(self, path):
+        if not os.environ.get("HOARD_EXPORT_DIR"):
+            plat.reveal(path)
+        return {"file": path}
+
+    def api_export_image(self, b):
+        """Save the map the user is looking at (a PNG data URL from the canvas)."""
+        import base64
+        data = b.get("data") or ""
+        if not data.startswith("data:image/png;base64,"):
+            return {"error": "That isn't a map image."}
+        raw = base64.b64decode(data.split(",", 1)[1])
+        base = re.sub(r"[^\w .-]", "", b.get("name") or "Hoard map")[:80]
+        path = reports.unique_path(self._export_dir(), f"{base} {time.strftime('%Y-%m-%d %H%M')}", "png")
+        with open(path, "wb") as f:
+            f.write(raw)
+        return self._saved(path)
+
+    def api_export_pdf(self, b):
+        """A one-file PDF: the map (as shown) plus what grew, largest folders and largest files."""
+        import base64
+        vid, parts = b["drive"], tuple(clean_parts(b.get("path") or []))
+        s = drive_state(vid)
+        if s["cur"] is None:
+            return {"error": "Scan this disk first."}
+        v = vol(vid)
+        jpeg = None
+        if (b.get("image") or "").startswith("data:image/jpeg;base64,"):
+            jpeg = base64.b64decode(b["image"].split(",", 1)[1])
+        with LOCK:
+            node, _ = walk(s["cur"], list(parts))
+            ch = all_changes(s)
+        joinp = lambda pp: full_path(vid, list(pp))   # noqa: E731
+        grew = [(joinp(pp), "+" + human(d)) for d, pp, _k, _sz, _c in ch if tuple(pp[:len(parts)]) == parts][:25]
+        folders = [(joinp(parts + (d.name,)), human(d.size)) for d in sorted(node.dirs, key=lambda d: -d.size)[:25]]
+        files = [(joinp(pp), human(sz)) for sz, pp, _c, _m in heapq.nlargest(25, iter_files(node, parts, set()), key=lambda x: x[0])]
+        when = time.strftime("%d %b %Y %H:%M", time.localtime(s["cur_ts"]))
+        sub = f"{human(node.size)} in {full_path(vid, list(parts))} · scanned {when}"
+        if v.get("total"):
+            sub += f" · {human(v['free'])} free of {human(v['total'])}"
+        pdf = reports.report_pdf(f"Hoard: {node.name}", sub,
+                                 [("What grew" + (f" since {time.strftime('%d %b', time.localtime(s['prev_ts']))}" if s["prev_ts"] else ""), grew),
+                                  ("Largest folders", folders), ("Largest files", files)], jpeg)
+        path = reports.unique_path(self._export_dir(), f"Hoard report {v['name'].strip(':')} {time.strftime('%Y-%m-%d %H%M')}", "pdf")
+        with open(path, "wb") as f:
+            f.write(pdf)
+        return self._saved(path)
+
     # ---------------------------------------------------------- settings
     def api_settings(self, b):
         st = core.load_settings()
+        import automation
         return {"settings": st, "schedule": plat.schedule_status(),
+                "cleanChoices": [{"id": s["id"], "title": s["title"]} for s in automation.auto_clean_choices()],
+                "contextMenu": plat.context_menu_status(), "contextMenuSupported": plat.NAME != "macos",
                 "scheduleNote": plat.SCHEDULE_NOTE, "storage": core.storage_bytes(),
                 "report": core.read_report()[-12:][::-1],
                 "defaultReportDir": os.path.join(plat.documents_dir(), "Hoard reports")}
@@ -1272,6 +1378,16 @@ class Handler(BaseHTTPRequestHandler):
             cur["fastScan"] = bool(new["fastScan"])
         if "updateCheck" in new:
             cur["updateCheck"] = bool(new["updateCheck"])
+        if isinstance(new.get("lowSpace"), dict):
+            ls = new["lowSpace"]
+            cur["lowSpace"] = {"enabled": bool(ls.get("enabled")), "percent": max(0.0, min(50.0, float(ls.get("percent") or 0))),
+                               "gb": max(0.0, min(10000.0, float(ls.get("gb") or 0)))}
+        if isinstance(new.get("autoClean"), dict):
+            import automation
+            ac, allowed = new["autoClean"], {s["id"] for s in automation.auto_clean_choices()}
+            cur["autoClean"] = {"enabled": bool(ac.get("enabled")), "every": "day" if ac.get("every") == "day" else "week",
+                                "ids": [i for i in ac.get("ids", []) if i in allowed],
+                                "last": cur.get("autoClean", {}).get("last", 0)}
         before = core.load_settings()
         cur["scheduleFast"] = bool(new.get("scheduleFast", cur.get("scheduleFast"))) and plat.NAME == "windows" \
             and any(fast_available(v) for v in VOLS.values())
@@ -1347,7 +1463,7 @@ def watchdog():
             os._exit(0)
 
 
-def main(open_window=True, port=0):
+def main(open_window=True, port=0, open_path=None):
     core.migrate_v1()
     try:
         import updates
@@ -1357,6 +1473,9 @@ def main(open_window=True, port=0):
     threading.Thread(target=core.warm_indexes, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    if open_path:                              # "Open in Hoard" from the file manager
+        from urllib.parse import quote
+        url += "?open=" + quote(open_path)
     if sys.stdout:
         print(url, flush=True)
     if not open_window:
@@ -1372,12 +1491,16 @@ def cli(argv):
     if "--uninstall" in argv:
         import updates
         sys.exit(updates.uninstall_interactive())
+    if "--tray" in argv:
+        import tray
+        sys.exit(tray.run())
     if "--scan" in argv:
         i = argv.index("--scan")
         ids = [a for a in argv[i + 1:] if not a.startswith("--")]
         sys.exit(headless_scan(ids))
+    open_path = argv[argv.index("--open") + 1] if "--open" in argv and argv.index("--open") + 1 < len(argv) else None
     main(open_window="--no-window" not in argv,
-         port=int(argv[argv.index("--port") + 1]) if "--port" in argv else 0)
+         port=int(argv[argv.index("--port") + 1]) if "--port" in argv else 0, open_path=open_path)
 
 
 if __name__ == "__main__":

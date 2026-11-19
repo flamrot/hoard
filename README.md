@@ -41,6 +41,17 @@ The app only listens on `127.0.0.1` and every request needs a per-launch token. 
 - **Google Drive** (and OneDrive, Dropbox, Box, S3, SharePoint… through [rclone](https://rclone.org)): **+ → Connect Google Drive** installs rclone if needed and opens Google's sign-in. Hoard shows your quota (including Gmail and Photos), maps every file without downloading anything, and can move files to Drive's own trash and empty it. Other clouds: run `rclone config` once and they appear automatically.
 - **Online-only files** (OneDrive, iCloud, Google Drive for desktop placeholders) are counted separately, so the map shows what's really on the disk.
 
+### Simple mode and the map's detail level
+Hoard opens in **Simple mode**: how full the drive is, one-click safe cleanup, what kinds of files use the space, the biggest folders, big files untouched for a year, and what grew. Switch it off for the full map; the map's **Detail** control (Low / Medium / High) starts at Low, a few dozen large blocks.
+
+### Automatic helpers (Settings)
+- **Low-space warnings** when a drive drops below a % or GB you choose (after the daily check, or from the tray).
+- **Clean up automatically**, weekly or daily: only the cache/temp targets you tick, never the Recycle Bin or your own files.
+- **Tray icon** (Windows): free space and today's growth on hover, warnings, quick open/check.
+- **“Open in Hoard”** in the right-click menu of File Explorer (Windows) or Nautilus/Nemo/Caja/Dolphin (Linux).
+- **Export** the map as a PNG, or a PDF report with the map and the what-grew / largest folders / largest files tables.
+- **Duplicates in Google Drive** and other clouds use the checksums the cloud already stores, so nothing is downloaded.
+
 ### Fast scan (Windows)
 Settings → **Fast scan** reads the NTFS file table directly (like WizTree) with a small Rust helper, `native/` → `hoard-mft.exe`. A whole drive takes seconds instead of a minute. Windows asks for administrator permission each time; decline and Hoard scans normally. Daily scheduled scans use the normal scanner. Building it needs Rust (`winget install Rustlang.Rustup`); without Rust the build simply leaves it out.
 
