@@ -82,6 +82,23 @@ def main():
         token = re.search(r'const TOKEN = "([^"]+)"', html).group(1)
         assert "<title>Hoard</title>" in html
 
+        # bundled animations and their player are served locally; nothing else is reachable that way
+        for name in ("startup", "loading", "scanning", "done"):
+            anim = json.loads(urllib.request.urlopen(f"{base}/assets/{name}.json", timeout=10).read())
+            if not anim.get("layers") or anim.get("op", 0) <= 0:
+                fail(f"animation {name} looks broken")
+        r = urllib.request.urlopen(base + "/assets/dotlottie-player.wasm", timeout=10)
+        if r.headers.get("Content-Type") != "application/wasm" or r.read(4) != b"\0asm":
+            fail("animation player WASM not served correctly")
+        for bad in ("/assets/../server.py", "/assets/ui.html", "/assets/%2e%2e/server.py"):
+            try:
+                urllib.request.urlopen(base + bad, timeout=10)
+                fail(f"{bad} should not be served")
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    fail(f"{bad} gave {e.code}, expected 404")
+        print("animations and player: served; other paths refused")
+
         def api(name, body=None):
             req = urllib.request.Request(base + "/api/" + name, data=json.dumps(body or {}).encode(),
                                          headers={"X-Token": token, "Content-Type": "application/json"})

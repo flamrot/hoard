@@ -93,6 +93,12 @@ python packaging/smoke_test.py dist/Hoard.exe --trash
 hoard/server.py      scanner, saved scans, comparisons, local HTTP API
 hoard/ui.html        the whole interface (one file, no dependencies)
 hoard/plat/          everything OS-specific: disks, Trash, reveal, protected paths, window
+hoard/assets/        Lottie animations (startup, loading, scanning, done) and the dotLottie player
 hoard/Hoard.pyw      launcher used for the packaged apps
 packaging/           build scripts, icons, .desktop file, smoke test
 ```
+
+### Logo and animations
+- The logo is `packaging/icons/hoard.svg`. `python packaging/make_icons.py packaging/icons/hoard.svg` rebuilds `hoard.ico` and the PNGs (it renders with Edge/Chrome, no Python packages needed).
+- The animations are generated from the logo's geometry: `python packaging/make_animations.py` writes `hoard/assets/*.json`.
+- They play through [dotLottie web](https://github.com/LottieFiles/dotlottie-web) (MIT, `hoard/assets/dotlottie-LICENSE.txt`), served from the app itself, so nothing is fetched from the internet. With "reduce motion" turned on in the OS, each animation shows a still frame instead.

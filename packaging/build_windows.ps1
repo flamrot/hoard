@@ -1,4 +1,4 @@
-# Builds dist\Hoard.exe: a single self-contained Windows executable.
+﻿# Builds dist\Hoard.exe: a single self-contained Windows executable.
 # Usage (from anywhere):  powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
@@ -26,6 +26,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name Hoard `
   --icon "$root\packaging\icons\hoard.ico" `
   @extra `
   --add-data "$root\hoard\ui.html;." `
+  --add-data "$root\hoard\assets;assets" `
   --paths "$root\hoard" `
   --distpath "$root\dist" --workpath "$root\build\work" --specpath "$root\build" `
   --log-level WARN `

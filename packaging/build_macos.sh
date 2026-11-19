@@ -28,6 +28,7 @@ python3 -m PyInstaller --noconfirm --clean --windowed --name Hoard \
   ${EXTRA[@]+"${EXTRA[@]}"} \
   --osx-bundle-identifier app.hoard.Hoard \
   --add-data "$ROOT/hoard/ui.html:." \
+  --add-data "$ROOT/hoard/assets:assets" \
   --paths "$ROOT/hoard" \
   --distpath "$ROOT/dist" --workpath "$ROOT/build/work" --specpath "$ROOT/build" \
   --log-level WARN \

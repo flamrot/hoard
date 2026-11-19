@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hoard</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='18' height='30' rx='3' fill='%233987e5'/%3E%3Crect x='21' y='1' width='10' height='17' rx='3' fill='%23d95926'/%3E%3Crect x='21' y='20' width='10' height='11' rx='3' fill='%23199e70'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='2' y='2' width='60' height='60' rx='14' fill='%23f3efe7'/%3E%3Crect x='11' y='10' width='15' height='44' rx='4' fill='%233d8bf2'/%3E%3Crect x='38' y='10' width='15' height='21' rx='4' fill='%23ef6b3a'/%3E%3Crect x='38' y='34' width='15' height='20' rx='4' fill='%2322b07d'/%3E%3Crect x='28.5' y='26' width='7' height='12' rx='2.5' fill='%23f5c44a'/%3E%3C/svg%3E">
 <style>
 :root {
   color-scheme: light;
@@ -591,13 +591,48 @@ body.no-toolbar { grid-template-rows: auto 1fr; }
   aside { border-left: 0; border-top: 1px solid var(--line); }
   .hstatus #status { display: none; }
 }
+/* ---- animations (Lottie via the bundled dotLottie player; CSS for the small loader) ---- */
+#splash { position: fixed; inset: 0; z-index: 100; display: grid; place-content: center; justify-items: center; gap: 10px;
+  background: var(--page); transition: opacity .35s ease, visibility .35s; }
+#splash.gone { opacity: 0; visibility: hidden; pointer-events: none; }
+#splash .art { width: 132px; height: 132px; position: relative; }
+#splash .art > * { position: absolute; inset: 0; width: 100%; height: 100%; }
+#splash .art svg { opacity: 0; }
+#splash.static .art svg { opacity: 1; }
+#splash .name { font-size: 22px; font-weight: 650; letter-spacing: -.01em; animation: up .5s .6s both cubic-bezier(.16, 1, .3, 1); }
+#splash .tag { font-size: 12.5px; color: var(--ink-2); animation: up .5s .75s both cubic-bezier(.16, 1, .3, 1); }
+.lot { position: relative; }
+.lot > canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.scananim { width: 208px; height: 130px; margin: 6px auto 2px; }
+.loading .lot.big { width: 44px; height: 46px; flex: none; }
+.celebrate { position: fixed; left: 50%; top: 42%; z-index: 90; transform: translate(-50%, -50%); pointer-events: none;
+  display: grid; justify-items: center; gap: 4px; padding: 14px 22px 16px; border-radius: 16px; background: var(--surface);
+  border: 1px solid var(--line-2); box-shadow: var(--shadow); animation: pop .25s ease both; transition: opacity .4s, transform .4s; }
+.celebrate.out { opacity: 0; transform: translate(-50%, -46%); }
+.celebrate .lot { width: 96px; height: 96px; }
+.celebrate b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.celebrate span { font-size: 12.5px; color: var(--ink-2); }
+/* the small loader: the logo's four blocks breathing in a wave */
+.spinner.hl { border: 0; border-radius: 0; animation: none; position: relative; width: 16px; height: 17px; flex: none; }
+.spinner.sm.hl { width: 13px; height: 14px; }
+.spinner.hl i { position: absolute; border-radius: 22%; animation: hwave 1.2s cubic-bezier(.65, 0, .35, 1) infinite; }
+.spinner.hl i:nth-child(1) { left: 0; top: 0; width: 35.7%; height: 100%; background: #3d8bf2; }
+.spinner.hl i:nth-child(2) { left: 41.7%; top: 36%; width: 16.6%; height: 28%; background: #f5c44a; animation-delay: .15s; }
+.spinner.hl i:nth-child(3) { left: 64.3%; top: 0; width: 35.7%; height: 47.7%; background: #ef6b3a; animation-delay: .3s; }
+.spinner.hl i:nth-child(4) { left: 64.3%; top: 54.5%; width: 35.7%; height: 45.5%; background: #22b07d; animation-delay: .45s; }
+@keyframes hwave { 0%, 55%, 100% { transform: scale(1); opacity: 1; } 22% { transform: scale(.68); opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
+<div id="splash" aria-hidden="true">
+  <div class="art lot"><svg viewBox="0 0 64 64"><rect x="2" y="2" width="60" height="60" rx="14" fill="#f3efe7"/><rect x="11" y="10" width="15" height="44" rx="4" fill="#3d8bf2"/><rect x="38" y="10" width="15" height="21" rx="4" fill="#ef6b3a"/><rect x="38" y="34" width="15" height="20" rx="4" fill="#22b07d"/><rect x="28.5" y="26" width="7" height="12" rx="2.5" fill="#f5c44a"/></svg></div>
+  <div class="name">Hoard</div>
+  <div class="tag">See what's taking up your space</div>
+</div>
 <header>
   <div class="brand" aria-label="Hoard">
-    <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="18" height="30" rx="3" fill="var(--c0)"/><rect x="21" y="1" width="10" height="17" rx="3" fill="var(--c1)"/><rect x="21" y="20" width="10" height="11" rx="3" fill="var(--c2)"/></svg>
+    <svg width="22" height="22" viewBox="10 9 44 46" aria-hidden="true"><rect x="11" y="10" width="15" height="44" rx="4" fill="#3d8bf2"/><rect x="38" y="10" width="15" height="21" rx="4" fill="#ef6b3a"/><rect x="38" y="34" width="15" height="20" rx="4" fill="#22b07d"/><rect x="28.5" y="26" width="7" height="12" rx="2.5" fill="#f5c44a"/></svg>
     Hoard
   </div>
   <div class="views" role="tablist" aria-label="Views">
@@ -1548,7 +1583,9 @@ function showState(kind, data) {
   stateEl.classList.add("show");
   const d = S.drives.find(x => x.id === S.drive), vn = esc(vol().name);
   if (kind === "loading") {
-    stateEl.innerHTML = `<div class="loading"><div class="spinner"></div>Opening the last scan of ${vn}…</div>`;
+    stateEl.innerHTML = `<div class="loading"><div class="lot big" id="ldAnim"></div>Opening the last scan of ${vn}…</div>`;
+    Anim.play($("#ldAnim"), "loading", { loop: true, still: "first" })
+      .catch(() => { const h = $("#ldAnim"); if (h) h.outerHTML = '<div class="spinner"></div>'; });
   } else if (kind === "empty") {
     stateEl.innerHTML = `<div class="card"><h2>${vn} hasn't been scanned yet</h2>
       ${d?.type === "cloud" ? `<p>Hoard lists every file in your ${vn} through rclone and draws it as a map. Nothing is downloaded or changed${d.used ? `; ${fmt(d.used)} of your storage is in use` : ""}.</p>`
@@ -1564,6 +1601,7 @@ function showState(kind, data) {
       <div class="h">${S.scanFast ? "Fast scan of" : "Scanning"} ${vn}</div>
       ${S.scanFast ? `<p style="margin:4px 0 0;font-size:12.5px">Windows asks for administrator permission to read the file table directly. Say no and Hoard scans the normal way.</p>` : ""}
       ${isCloudVol() ? `<p style="margin:4px 0 0;font-size:12.5px">Listing every file through rclone. Nothing is downloaded; big drives take a few minutes.</p>` : ""}
+      <div class="scananim lot" id="scAnim" aria-hidden="true"></div>
       <div class="big num"><span id="scBytes">0 B</span><span class="of" id="scOf"></span></div>
       <div class="progress" id="scBar"><i></i></div>
       <div class="scanmeta num"><span id="scFiles">Starting…</span><span id="scTime"></span></div>
@@ -1575,6 +1613,10 @@ function showState(kind, data) {
     $("#scCancel").onclick = async () => { $("#scCancel").disabled = true; await api("cancel"); };
     const hide = $("#scHide");
     if (hide) hide.onclick = () => { S.scanMin = true; hideState(); updateScanUI(S.lastProg); };
+    S.scanAnim = null; scanFrame = scanTarget = 0;
+    Anim.play($("#scAnim"), "scanning", { autoplay: false, still: "first" })
+      .then(p => { S.scanAnim = p; updateScanUI(S.lastProg); })
+      .catch(() => $("#scAnim")?.remove());
     updateScanUI(S.lastProg);
   }
 }
@@ -1595,6 +1637,7 @@ function updateScanUI(p) {
   targetBytes = p.bytes; if (!rafId) rafId = requestAnimationFrame(animateBytes);
   $("#scOf").textContent = p.used ? ` of ~${fmt(p.used)}` : "";
   $("#scBar i").style.width = pct + "%";
+  scanAnimTo(pct, !!p.used);
   $("#scFiles").textContent = p.cancelled ? "Stopping…" : `${p.files.toLocaleString()} files`;
   const s = Math.round(p.elapsed); $("#scTime").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   $("#scCur span").textContent = p.current || "";
@@ -1656,6 +1699,84 @@ async function poll() {
 
 /* ------------------------------------------------------------------ shared helpers */
 const SPIN = '<div class="spinner sm"></div>';
+
+/* ------------------------------------------------------------------ animations
+   Lottie files in /assets, played by the bundled dotLottie player (loaded on first use, WASM served locally:
+   nothing is fetched from the internet). Like lottie-lite: reduced motion shows a still frame, and players
+   whose element has left the page are destroyed. */
+const Anim = (() => {
+  let lib = null;
+  const players = new Set();
+  const load = () => lib ||= import("/assets/dotlottie.js").then(m => {
+    m.DotLottie.setWasmUrl(new URL("/assets/dotlottie-player.wasm", location.href).href);
+    return m.DotLottie;
+  });
+  async function play(host, name, { loop = false, autoplay = true, still = "last" } = {}) {
+    const DotLottie = await load();
+    const canvas = document.createElement("canvas");
+    host.appendChild(canvas);
+    const p = new DotLottie({ canvas, src: `/assets/${name}.json`, loop: loop && !reduced, autoplay: autoplay && !reduced,
+                              renderConfig: { autoResize: true } });
+    p.host = host; players.add(p);
+    await new Promise((res, rej) => { p.addEventListener("load", res); p.addEventListener("loadError", rej); });
+    if (reduced && autoplay) p.setFrame(still === "first" ? 0 : p.totalFrames - 1);
+    return p;
+  }
+  setInterval(() => { for (const p of players) if (!p.host.isConnected) { p.destroy(); players.delete(p); } }, 3000);
+  return { load, play };
+})();
+
+/* every spinner becomes the logo's breathing blocks (pure CSS, so lists that re-render often stay cheap) */
+function upgradeSpinners(root) {
+  root.querySelectorAll?.(".spinner:not(.hl):not([style])").forEach(s => { s.classList.add("hl"); s.innerHTML = "<i></i><i></i><i></i><i></i>"; });
+}
+upgradeSpinners(document);
+new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) {
+  if (n.matches(".spinner:not(.hl):not([style])")) upgradeSpinners(n.parentNode); else upgradeSpinners(n);
+} }).observe(document.body, { childList: true, subtree: true });
+
+/* the window opens on the logo assembling itself, once per window, and never for longer than the app needs */
+const Splash = (() => {
+  const el = $("#splash");
+  let seen = false; try { seen = sessionStorage.getItem("hoard.splashed") === "1"; sessionStorage.setItem("hoard.splashed", "1"); } catch { /* */ }
+  if (!el || reduced || seen) { el?.remove(); return { done() {} }; }
+  let played = false, ready = false;
+  const finish = () => { if (!played || !ready || !el.isConnected) return; el.classList.add("gone"); setTimeout(() => el.remove(), 400); };
+  Anim.play(el.querySelector(".art"), "startup")
+    .then(p => p.addEventListener("complete", () => { played = true; finish(); }))
+    .catch(() => { el.classList.add("static"); setTimeout(() => { played = true; finish(); }, 600); });
+  setTimeout(() => { played = true; finish(); }, 2200);                // a slow player never holds the app up
+  setTimeout(() => { played = ready = true; finish(); }, 4000);
+  return { done() { ready = true; finish(); } };
+})();
+
+/* a short "done" moment when space is actually freed */
+function celebrate(title, sub = "") {
+  document.querySelectorAll(".celebrate").forEach(c => c.remove());
+  const c = document.createElement("div");
+  c.className = "celebrate"; c.setAttribute("aria-hidden", "true");
+  c.innerHTML = `<div class="lot"></div><b>${esc(title)}</b>${sub ? `<span>${esc(sub)}</span>` : ""}`;
+  document.body.appendChild(c);
+  Anim.play(c.querySelector(".lot"), "done").catch(() => c.querySelector(".lot").remove());
+  setTimeout(() => { c.classList.add("out"); setTimeout(() => c.remove(), 450); }, 1900);
+}
+
+/* the scan card's treemap fills in step with the scan; when the total isn't known it just loops */
+let scanFrame = 0, scanTarget = 0, scanRaf = 0;
+function scanAnimTo(pct, known) {
+  const p = S.scanAnim;
+  if (!p || !p.host.isConnected) return;
+  if (!known) { if (!p.isPlaying && !reduced) { p.setLoop(true); p.play(); } return; }
+  scanTarget = Math.max(scanFrame, pct / 100 * (p.totalFrames - 1));
+  if (reduced) { scanFrame = scanTarget; p.setFrame(scanFrame); return; }
+  if (!scanRaf) scanRaf = requestAnimationFrame(function step() {
+    if (!p.host.isConnected) { scanRaf = 0; return; }
+    scanFrame += (scanTarget - scanFrame) * .1;
+    if (Math.abs(scanTarget - scanFrame) < .05) scanFrame = scanTarget;
+    p.setFrame(scanFrame);
+    scanRaf = scanFrame !== scanTarget ? requestAnimationFrame(step) : 0;
+  });
+}
 const volOf = id => S.drives.find(d => d.id === id);
 function absPath(vid, p) {
   const v = volOf(vid), sep = S.sep;
@@ -1775,7 +1896,9 @@ async function emptyBin() {
   if (!ok) return;
   try {
     const r = await api("cleanup_run", { id: "bin" });
-    if (r.error) toast(r.error, "error"); else toast(`Emptied the ${S.trashName}`, "ok", r.freed ? `Freed ${fmt(r.freed)}.` : "");
+    if (r.error) toast(r.error, "error");
+    else if (r.freed) celebrate(`Freed ${fmt(r.freed)}`, `The ${S.trashName} is empty`);
+    else toast(`Emptied the ${S.trashName}`, "ok");
     refreshDrives();
     if (S.mode === "cleanup") pollCleanup();
   } catch (e) { toast(e.message, "error"); }
@@ -2127,7 +2250,8 @@ async function runCleanup(i) {
     const r = await api("cleanup_run", { id: i.id });
     if (r.error) return toast(r.error, "error");
     if (r.launched) toast("Opened Windows Disk Cleanup", "ok", "Tick “Clean up system files” there for Windows Update leftovers.");
-    else toast(`Freed ${fmt(r.freed || 0)}`, "ok", r.skipped ? `${r.skipped.toLocaleString()} items were in use or protected and were skipped.` : "");
+    else if (r.freed) celebrate(`Freed ${fmt(r.freed)}`, r.skipped ? `${r.skipped.toLocaleString()} items in use were skipped` : "");
+    else toast("Nothing to free", "ok", r.skipped ? `${r.skipped.toLocaleString()} items were in use or protected and were skipped.` : "");
     refreshDrives(); pollCleanup();
   } catch (e) { toast(e.message, "error"); }
 }
@@ -2451,7 +2575,8 @@ async function simpleCleanup(items) {
       freed += r.freed || 0; skipped += r.skipped || 0;
     }
     d.close();
-    toast(`Freed ${fmt(freed)}`, "ok", skipped ? `${skipped.toLocaleString()} files were in use and were left alone.` : "");
+    if (freed) celebrate(`Freed ${fmt(freed)}`, skipped ? `${skipped.toLocaleString()} files in use were left alone` : "Your drive has more room now");
+    else toast("Nothing to free", "ok", skipped ? `${skipped.toLocaleString()} files were in use and were left alone.` : "");
     S.cleanup = null;
     await refreshDrives();
     renderSimple();
@@ -2817,7 +2942,7 @@ addEventListener("pagehide", () => navigator.sendBeacon("/api/bye", TOKEN));
     if (S.scanMin) updateScanUI(running); else showState("scan");
     renderAll(); poll();
   }
-})();
+})().finally(() => Splash.done());
 </script>
 </body>
 </html>

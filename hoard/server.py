@@ -669,7 +669,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, html_bytes, "text/html; charset=utf-8")
         if u.path == "/file":
             return self._file(parse_qs(u.query))
+        if u.path.startswith("/assets/"):
+            return self._asset(u.path.removeprefix("/assets/"))
         self._send(404, {"error": "not found"})
+
+    ASSET_TYPES = {"startup.json": "application/json", "loading.json": "application/json",
+                   "scanning.json": "application/json", "done.json": "application/json",
+                   "dotlottie.js": "text/javascript; charset=utf-8", "dotlottie-player.wasm": "application/wasm"}
+
+    def _asset(self, name):
+        """The animation player and animations bundled with the app: a fixed list, nothing else."""
+        ctype = self.ASSET_TYPES.get(name)
+        if not ctype:
+            return self._send(404, {"error": "not found"})
+        try:
+            with open(os.path.join(RES_DIR, "assets", name), "rb") as f:
+                body = f.read()
+        except OSError:
+            return self._send(404, {"error": "not found"})
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _file(self, q):
         """Stream a file for the preview (images, video, audio, PDF, text). Range requests supported."""

@@ -19,3 +19,6 @@ __pycache__/
 /build.py
 /top.py
 /hoard/import_old.py
+
+# review notes and screenshots (local only)
+/review/

@@ -23,6 +23,7 @@ fi
 python3 -m PyInstaller --noconfirm --clean --windowed --name hoard \
   ${EXTRA[@]+"${EXTRA[@]}"} \
   --add-data "$ROOT/hoard/ui.html:." \
+  --add-data "$ROOT/hoard/assets:assets" \
   --paths "$ROOT/hoard" \
   --distpath "$ROOT/build/dist" --workpath "$ROOT/build/work" --specpath "$ROOT/build" \
   --log-level WARN \
