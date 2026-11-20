@@ -117,6 +117,9 @@ class Scan:
         self._tick = 0
 
 
+POSIX = plat.NAME != "windows"
+
+
 def scan_dir(path, name, st, keep=None):
     """Measure a folder. keep: {name: Node} of subfolders known to be unchanged, reused instead of rescanned."""
     node = Node(name)
@@ -154,9 +157,11 @@ def scan_dir(path, name, st, keep=None):
                 elif e.is_file(follow_symlinks=False):
                     s = e.stat(follow_symlinks=False)
                     sz = size_of(s)
-                    if s.st_nlink > 1 and sz >= 65536:          # POSIX hard links: each name carries an equal
-                        sz //= s.st_nlink                       # share, so a folder measures the same alone or in
-                                                                # a whole scan (and as hoard-walk counts it)
+                    if POSIX and s.st_nlink > 1 and sz >= 65536:    # hard links: each name carries an equal share,
+                        sz //= s.st_nlink                       # so a folder measures the same alone or in a whole
+                        # scan (as hoard-walk counts it; Windows has neither, it counts a linked file once by id).
+                        # ponytail: removing one name leaves the others' shares stale until the next full scan;
+                        # finding them needs an inode index of the whole disk.
                     attrs = getattr(s, "st_file_attributes", 0)
                     if attrs & 0xA00 and plat.alloc_size:       # Windows sparse (0x200) / compressed (0x800)
                         sz = plat.alloc_size(e.path, sz)
