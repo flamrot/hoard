@@ -40,6 +40,7 @@ PLIST="dist/Hoard.app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :NSDesktopFolderUsageDescription string 'Hoard measures folder sizes to show what uses disk space.'" "$PLIST" || true
 /usr/libexec/PlistBuddy -c "Add :NSDocumentsFolderUsageDescription string 'Hoard measures folder sizes to show what uses disk space.'" "$PLIST" || true
 /usr/libexec/PlistBuddy -c "Add :NSDownloadsFolderUsageDescription string 'Hoard measures folder sizes to show what uses disk space.'" "$PLIST" || true
+xattr -cr "dist/Hoard.app"     # codesign refuses Finder info / resource forks ("detritus not allowed")
 if [ -n "${MACOS_CERT_P12:-}" ] && [ -n "${MACOS_CERT_PASSWORD:-}" ]; then
   # Developer ID signing + notarization (GitHub secrets: MACOS_CERT_P12 base64, MACOS_CERT_PASSWORD,
   # APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD). Signed + notarized apps open without warnings.
