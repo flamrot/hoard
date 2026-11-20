@@ -22,3 +22,4 @@ __pycache__/
 
 # review notes and screenshots (local only)
 /review/
+.DS_Store

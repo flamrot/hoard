@@ -4,7 +4,9 @@ $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 Set-Location $root
 
-python -m pip install --quiet --upgrade pyinstaller
+# pywebview = Hoard's own window (WebView2, built into Windows 10/11), so the taskbar button is Hoard's and
+# can be pinned. Without WebView2 Hoard falls back to an Edge app window.
+python -m pip install --quiet --upgrade pyinstaller pywebview
 
 # Fast-scan helper (Rust). Optional: without it Hoard just uses the normal scanner.
 $extra = @()

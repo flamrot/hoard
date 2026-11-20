@@ -3054,7 +3054,7 @@ async function openSettings() {
       <select id="stNotify">${opt([0, 0.5, 1, 2, 5, 10], st.notifyGB, v => +v ? (v < 1 ? v * 1000 + " MB" : v + " GB") : "Never")}</select></div></section>
     <section class="set"><div class="set-row"><div><b>Keep scan history</b><small>Older scans are deleted automatically. Saved scans now use ${fmt(r.storage)}.</small></div>
       <select id="stKeep">${opt([7, 14, 30, 60, 90], st.keep, v => v + " scans")}</select></div></section>
-    <section class="set"><div class="set-row"><div><b>Warn me when a drive is almost full</b><small>A notification (at most once a day per drive) after the daily check${S.os === "windows" ? " or from the tray icon" : ""}.</small></div>
+    <section class="set"><div class="set-row"><div><b>Warn me when a drive is almost full</b><small>A notification (at most once a day per drive) after the daily check${S.os === "windows" ? " or from the tray icon" : S.os === "macos" ? " or from the menu bar icon" : ""}.</small></div>
       <label class="switch"><input type="checkbox" id="stLow" ${st.lowSpace?.enabled ? "checked" : ""} aria-label="Low space warning"><span></span></label></div>
       <div class="field" style="margin-top:10px"><span style="width:auto">When less than</span>
         <input type="number" id="stLowPct" min="0" max="50" value="${st.lowSpace?.percent ?? 10}" style="width:64px;height:30px;border-radius:6px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--ink);font:inherit;padding:0 6px"> % or
@@ -3064,9 +3064,11 @@ async function openSettings() {
       <label class="switch"><input type="checkbox" id="stAuto" ${st.autoClean?.enabled ? "checked" : ""} aria-label="Clean up automatically"><span></span></label></div>
       <div class="field" style="margin-top:10px"><span style="width:auto">Every</span><select id="stAutoEvery"><option value="week" ${st.autoClean?.every !== "day" ? "selected" : ""}>week</option><option value="day" ${st.autoClean?.every === "day" ? "selected" : ""}>day</option></select></div>
       <div class="checks" style="margin-top:10px">${(r.cleanChoices || []).map(c => `<label><input type="checkbox" data-auto="${esc(c.id)}" ${(st.autoClean?.ids || []).includes(c.id) ? "checked" : ""}>${esc(c.title)}</label>`).join("")}</div></section>
-    ${S.os === "windows" || r.contextMenuSupported ? `<h4 class="set-group" id="setDesk">Desktop</h4><section class="set">
+    ${S.os === "windows" || S.os === "macos" || r.contextMenuSupported ? `<h4 class="set-group" id="setDesk">Desktop</h4><section class="set">
       ${S.os === "windows" ? `<div class="set-row"><div><b>Tray icon</b><small>Free space at a glance next to the clock, low-space warnings, and quick access. Starts when you sign in.</small></div>
         <label class="switch"><input type="checkbox" id="stTray" ${st.tray ? "checked" : ""} aria-label="Tray icon"><span></span></label></div>` : ""}
+      ${S.os === "macos" ? `<div class="set-row"><div><b>Menu bar icon</b><small>Free space at a glance in the menu bar, low-space warnings, and quick access. Starts when you log in.</small></div>
+        <label class="switch"><input type="checkbox" id="stTray" ${st.tray ? "checked" : ""} aria-label="Menu bar icon"><span></span></label></div>` : ""}
       ${r.contextMenuSupported ? `<div class="set-row" style="margin-top:12px"><div><b>“Open in Hoard” when you right-click a folder</b><small>${S.os === "windows" ? "In File Explorer (on Windows 11, under “Show more options”)." : "In Files/Nautilus, Nemo and Caja (Scripts menu) and Dolphin."}</small></div>
         <label class="switch"><input type="checkbox" id="stCtx" ${r.contextMenu ? "checked" : ""} aria-label="Right-click menu"><span></span></label></div>` : ""}</section>` : ""}
     <section class="set"><div class="set-row"><div><b>Save a report after each daily scan</b><small>An HTML page listing what grew and the largest folders and files, saved to ${esc(st.reportDir || r.defaultReportDir)}.</small></div>
@@ -3126,7 +3128,7 @@ async function openSettings() {
   const tr = $("#stTray");
   if (tr) tr.onchange = async () => {
     const x = await api("tray", { on: tr.checked }).catch(e => ({ error: e.message }));
-    if (x.error) { toast(x.error, "error"); tr.checked = !tr.checked; } else toast(tr.checked ? "Tray icon is on" : "Tray icon is off");
+    if (x.error) { toast(x.error, "error"); tr.checked = !tr.checked; } else toast(`${S.os === "macos" ? "Menu bar" : "Tray"} icon is ${tr.checked ? "on" : "off"}`);
   };
   const cx = $("#stCtx");
   if (cx) cx.onchange = async () => {

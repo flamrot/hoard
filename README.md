@@ -15,7 +15,7 @@ Runs on **Windows**, **macOS** and **Linux**.
 
 ### Where the window comes from
 - **macOS:** a native window (WKWebView via pywebview).
-- **Windows:** an Edge app window (Edge ships with Windows).
+- **Windows:** a native window (WebView2 via pywebview), so Hoard can be pinned to the taskbar. Without WebView2 it falls back to an Edge app window.
 - **Linux:** a Chrome, Chromium, Edge, Brave or Vivaldi app window if one is installed, otherwise your default browser. If `pywebview` with its GTK backend is installed system-wide and you run from source, you get a native window.
 
 The app only listens on `127.0.0.1` and every request needs a per-launch token. Nothing is uploaded.
@@ -69,7 +69,7 @@ On the map: **arrow keys** move between blocks, **Enter** opens a folder, **Back
 ### Automatic helpers (Settings)
 - **Low-space warnings** when a drive drops below a % or GB you choose (after the daily check, or from the tray).
 - **Clean up automatically**, weekly or daily: only the cache/temp targets you tick, never the Recycle Bin or your own files.
-- **Tray icon** (Windows): free space and today's growth on hover, warnings, quick open/check.
+- **Tray icon** (Windows) / **menu bar icon** (macOS): free space and today's growth at a glance, warnings, quick open/check.
 - **“Open in Hoard”** in the right-click menu of File Explorer (Windows) or Nautilus/Nemo/Caja/Dolphin (Linux).
 - **Export** the map as a PNG, or a PDF report with the map and the what-grew / largest folders / largest files tables.
 - **Duplicates in Google Drive** and other clouds use the checksums the cloud already stores, so nothing is downloaded.

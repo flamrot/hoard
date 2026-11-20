@@ -7,7 +7,6 @@ import ctypes
 import os
 import subprocess
 import sys
-import time
 from ctypes import wintypes
 
 import automation
@@ -75,20 +74,7 @@ def _setup_api():
     k32.GetModuleHandleW.restype = wintypes.HMODULE
 
 
-def tooltip_text(vols, report, now=None):
-    """'Hoard · C: 167 GB free (+1.4 GB today) · D: 253 GB free', trimmed to the 127 characters Windows allows."""
-    import shutil
-    now = now or time.time()
-    parts = []
-    for v in vols:
-        try:
-            free = shutil.disk_usage(v["root"]).free
-        except OSError:
-            continue
-        grew = [e for e in report if e.get("vol") == v["id"] and now - e.get("time", 0) < 86400 and "delta" in e]
-        g = f" ({'+' if grew[-1]['delta'] >= 0 else '−'}{core.human(abs(grew[-1]['delta']))} today)" if grew and abs(grew[-1]["delta"]) >= 50 << 20 else ""
-        parts.append(f"{v['name']} {core.human(free)} free{g}")
-    return ("Hoard · " + " · ".join(parts))[:127]
+tooltip_text = automation.tooltip_text      # shared with the macOS menu bar icon
 
 
 class Tray:

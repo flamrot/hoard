@@ -1293,9 +1293,12 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": ok, "error": err, "on": plat.context_menu_status()}
 
     def api_tray(self, b):
-        if plat.NAME != "windows":
-            return {"error": "The tray icon is Windows-only; low-space alerts still come with the daily check."}
-        import tray
+        if plat.NAME not in ("windows", "macos"):
+            return {"error": "The tray icon is on Windows and macOS only; low-space alerts still come with the daily check."}
+        if plat.NAME == "macos":
+            import menubar as tray
+        else:
+            import tray
         ok, err = tray.set_autostart(bool(b.get("on")))
         st = core.load_settings()
         st["tray"] = bool(b.get("on")) and ok
@@ -1793,7 +1796,10 @@ def cli(argv):
         import updates
         sys.exit(updates.uninstall_interactive())
     if "--tray" in argv:
-        import tray
+        if plat.NAME == "macos":
+            import menubar as tray
+        else:
+            import tray
         sys.exit(tray.run())
     if "--scan" in argv:
         i = argv.index("--scan")

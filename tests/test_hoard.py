@@ -580,11 +580,10 @@ class CloudDupes(unittest.TestCase):
 
 
 class Desktop(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == "win32", "Windows tray")
     def test_tray_tooltip(self):
-        import tray
-        vols = [{"id": "C", "name": "C:", "root": os.environ.get("SystemDrive", "C:") + "\\"}]
-        tip = tray.tooltip_text(vols, [{"vol": "C", "time": time.time(), "delta": 2 << 30}])
+        import automation
+        vols = [{"id": "C", "name": "C:", "root": os.environ.get("SystemDrive", "C:") + "\\" if sys.platform == "win32" else "/"}]
+        tip = automation.tooltip_text(vols, [{"vol": "C", "time": time.time(), "delta": 2 << 30}])
         self.assertTrue(tip.startswith("Hoard"))
         self.assertIn("+2.0 GB today", tip)
         self.assertLessEqual(len(tip), 127)
