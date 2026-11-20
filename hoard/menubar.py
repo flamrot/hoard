@@ -96,9 +96,17 @@ def run():
         def hide_(self, _sender):
             NSApplication.sharedApplication().terminate_(None)
 
+        # This process is "Hoard" to macOS, so opening Hoard from Finder or the Dock while the icon runs
+        # only reopens this process: open the window then.
+        @objc.typedSelector(b"Z@:@Z")
+        def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _visible):
+            self.open_(None)
+            return False
+
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)     # no Dock icon, no app menu
     bar = Bar.alloc().init()
+    app.setDelegate_(bar)
     bar.setUp()
     app.run()
     return 0
