@@ -1739,7 +1739,10 @@ function showState(kind, data) {
     updateScanUI(S.lastProg);
   }
 }
-$("#scanChip").onclick = () => { S.scanMin = false; showState("scan"); updateScanUI(S.lastProg); };
+$("#scanChip").onclick = () => {
+  if (S.mode !== "map") S.mode === "simple" ? setSimple(false, { visit: true }) : setMode("map");   // the card lives on the map
+  S.scanMin = false; showState("scan"); updateScanUI(S.lastProg);
+};
 
 /* progress shows in the modal, or in the header chip once the modal is hidden */
 function updateScanUI(p) {
