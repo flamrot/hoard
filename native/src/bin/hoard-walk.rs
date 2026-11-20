@@ -37,8 +37,9 @@ struct Shared {
     errors: AtomicU64,
     current: Mutex<String>,
     done: AtomicBool,
-    /// hard links: a file with several names is counted once. Only where file ids are trustworthy
-    /// (NTFS/ReFS on Windows; every Unix file system via (device, inode)).
+    /// Windows hard links: a file with several names is counted once, where file ids are trustworthy (NTFS/ReFS).
+    /// Unix splits a linked file's size between its names instead (see list_std).
+    #[cfg_attr(unix, allow(dead_code))]
     dedupe: bool,
     seen: Mutex<HashSet<(u64, u64)>>,
 }
@@ -48,6 +49,7 @@ const DEDUPE_MIN: u64 = 64 << 10;
 
 impl Shared {
     /// True the first time a file id is seen; false for another name of an already-counted file.
+    #[cfg_attr(unix, allow(dead_code))]
     fn first_sighting(&self, key: (u64, u64)) -> bool {
         if !self.dedupe || key == (0, 0) { return true; }
         self.seen.lock().unwrap().insert(key)
@@ -227,21 +229,20 @@ fn list_std(sh: &Shared, dir: &PathBuf, acc: &mut Acc, extmap: &HashMap<String, 
             if !exclude.contains(&path) { acc.dir(sh, name, path); }
         } else if ft.is_file() {
             let Ok(md) = e.metadata() else { sh.errors.fetch_add(1, Ordering::Relaxed); continue; };
-            let (sz, cl) = sizes(&md);
-            if sz >= DEDUPE_MIN && !sh.first_sighting(link_key(&md)) { continue; }   // another name of a counted file
+            #[allow(unused_mut)]
+            let (mut sz, cl) = sizes(&md);
+            // Unix hard links: each name carries an equal share, so any part of the tree measures the same on its own
+            // as in a whole scan (Hoard re-measures single folders after Files jobs). Same rule as core.scan_dir.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if md.nlink() > 1 && sz >= DEDUPE_MIN { sz /= md.nlink(); }
+            }
             let cat = cat_of(extmap, &name);
             acc.file(sh, name, sz, cl, mtime_of(&md), cat);
         }
     }
 }
-
-#[cfg(unix)]
-fn link_key(md: &fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
-    if md.nlink() > 1 { (md.dev(), md.ino()) } else { (0, 0) }
-}
-#[cfg(windows)]
-fn link_key(_md: &fs::Metadata) -> (u64, u64) { (0, 0) }   // read_dir has no file ids; winlist handles NTFS
 
 fn process(sh: &Shared, task: Task, extmap: &HashMap<String, u8>, exclude: &HashSet<PathBuf>) {
     let mut acc = Acc::default();
@@ -334,7 +335,7 @@ fn run() -> Result<(), String> {
         #[cfg(windows)]
         dedupe: winlist::ids_reliable(&root),
         #[cfg(not(windows))]
-        dedupe: true,
+        dedupe: false,
         seen: Mutex::new(HashSet::new()),
     });
     sh.results.lock().unwrap()[0] = Some(DirRec { name: name.clone(), children: vec![], agg: Agg::default(), kept: vec![] });

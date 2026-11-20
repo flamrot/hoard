@@ -115,7 +115,6 @@ class Scan:
         self.cloud = 0
         self.fast = False
         self._tick = 0
-        self.seen = set()          # (device, inode) of hard-linked files already counted
 
 
 def scan_dir(path, name, st, keep=None):
@@ -155,11 +154,9 @@ def scan_dir(path, name, st, keep=None):
                 elif e.is_file(follow_symlinks=False):
                     s = e.stat(follow_symlinks=False)
                     sz = size_of(s)
-                    if s.st_nlink > 1 and sz >= 65536:          # POSIX hard links: count each file once
-                        key = (s.st_dev, s.st_ino)
-                        if key in st.seen:
-                            continue
-                        st.seen.add(key)
+                    if s.st_nlink > 1 and sz >= 65536:          # POSIX hard links: each name carries an equal
+                        sz //= s.st_nlink                       # share, so a folder measures the same alone or in
+                                                                # a whole scan (and as hoard-walk counts it)
                     attrs = getattr(s, "st_file_attributes", 0)
                     if attrs & 0xA00 and plat.alloc_size:       # Windows sparse (0x200) / compressed (0x800)
                         sz = plat.alloc_size(e.path, sz)

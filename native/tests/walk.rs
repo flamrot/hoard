@@ -53,3 +53,27 @@ fn a_missing_root_still_writes_a_tree() {
     assert!(fs::read_to_string(&out).unwrap().starts_with('['));
     let _ = fs::remove_dir_all(&work);
 }
+
+#[cfg(unix)]
+#[test]
+fn hard_links_share_the_size_between_their_names() {
+    use std::os::unix::fs::MetadataExt;
+    let root = tmp("links");
+    fs::create_dir_all(root.join("a")).unwrap();
+    fs::create_dir_all(root.join("b")).unwrap();
+    fs::write(root.join("a/data.bin"), vec![7u8; 2 << 20]).unwrap();
+    fs::hard_link(root.join("a/data.bin"), root.join("b/data.bin")).unwrap();
+    let alloc = fs::metadata(root.join("a/data.bin")).unwrap().blocks() * 512;
+    let work = tmp("links-out");
+    let (out, prog, ext) = (work.join("t.json"), work.join("p.txt"), work.join("e.tsv"));
+    fs::write(&ext, "").unwrap();
+    let st = Command::new(env!("CARGO_BIN_EXE_hoard-walk"))
+        .arg(&root).arg(&out).arg(&prog).arg(&ext).arg("--name").arg("Root").status().unwrap();
+    assert!(st.success());
+    let progress = fs::read_to_string(&prog).unwrap();
+    let f: Vec<&str> = progress.trim_end().split('\t').collect();
+    assert_eq!(f[1], "2", "both names are listed");
+    assert_eq!(f[3].parse::<u64>().unwrap(), alloc / 2 * 2, "the bytes are counted once in all: {progress}");
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&work);
+}

@@ -659,15 +659,17 @@ def refresh_paths(paths):
         volumes()
     fold = (lambda x: x) if plat.NAME == "linux" else str.casefold
     todo = {}                                 # (vol id, folder parts) -> names in it to measure again
+    scanned = [(vid, v["root"]) for vid, v in list(VOLS.items()) if v["type"] != "cloud" and list_snaps(vid)]
     for p in paths:
-        vid, parts, _node = locate(p)
-        if vid is None or not parts or drive_state(vid)["cur"] is None:
-            continue
-        with LOCK:
-            n, depth = drive_state(vid)["cur"], 0
-            while depth < len(parts) - 1 and (c := n.child(parts[depth])) is not None:   # deepest folder in the scan
-                n, depth = c, depth + 1
-        todo.setdefault((vid, tuple(parts[:depth])), set()).add(fold(parts[depth]))
+        for vid, root in scanned:             # every scan it's in: an added folder can sit inside a scanned drive
+            parts = core.rel_parts(root, p)
+            if not parts or drive_state(vid)["cur"] is None:
+                continue                      # elsewhere, or the location itself (it needs a full scan)
+            with LOCK:
+                n, depth = drive_state(vid)["cur"], 0
+                while depth < len(parts) - 1 and (c := n.child(parts[depth])) is not None:   # deepest folder in the scan
+                    n, depth = c, depth + 1
+            todo.setdefault((vid, tuple(parts[:depth])), set()).add(fold(parts[depth]))
     deep = {(vid, tuple(fold(x) for x in f) + (n,)) for (vid, f), names in todo.items() for n in names}
     touched = set()
     for (vid, f), names in todo.items():

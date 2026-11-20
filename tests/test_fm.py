@@ -192,33 +192,70 @@ class Listing(Base):
             self.assertEqual(fm.fm_read({"path": os.path.join(self.d, "z.txt:stream")}), {"error": "Bad path."})
 
 
+def shape(n):
+    """Everything a scan records about a folder, to compare an updated scan with a fresh one."""
+    return (n.name, n.size, n.nfiles, n.cats, sorted(f[:2] for f in n.files), sorted(shape(c) for c in n.dirs))
+
+
 class ScanFollowsJobs(Base):
+    def setUp(self):
+        super().setUp()
+        self.d, self.vols = os.path.realpath(self.d), []
+
+    def tearDown(self):
+        for v in self.vols:
+            server.VOLS.pop(v["id"], None)
+
+    def scanned(self, root):
+        v = server.location_volume(root)
+        server.VOLS[v["id"]] = v
+        server.STATE.pop(v["id"], None)
+        core.save_snapshot(v["id"], core.scan_volume(v, core.Scan(v["id"], 0)), 1000, root=root)
+        self.vols.append(v)
+        return v
+
+    def assert_like_fresh_scan(self, v):
+        self.assertEqual(shape(server.drive_state(v["id"])["cur"]), shape(core.scan_volume(v, core.Scan(v["id"], 0))))
+
     def test_jobs_update_the_saved_scan(self):
-        d, big = os.path.realpath(self.d), 2 << 20
+        d, big = self.d, 2 << 20
         write(os.path.join(d, "src", "big.bin"), b"x" * big)
         write(os.path.join(d, "src", "keep", "small.txt"), b"y" * 100)
         os.makedirs(os.path.join(d, "dst"))
-        v = server.location_volume(d)
-        server.VOLS[v["id"]] = v
-        server.STATE.pop(v["id"], None)
-        core.save_snapshot(v["id"], core.scan_volume(v, core.Scan(v["id"], 0)), 1000, root=d)
-        try:
-            run("move", sources=[os.path.join(d, "src", "big.bin")], dest=os.path.join(d, "dst"))
-            run("move", sources=[os.path.join(d, "src", "keep")], dest=os.path.join(d, "dst"))
-            run("copy", sources=[os.path.join(d, "dst", "keep")], dest=d)
-            cur, fresh = server.drive_state(v["id"])["cur"], core.scan_volume(v, core.Scan(v["id"], 0))
-            shape = lambda n: (n.name, n.size, n.nfiles, n.cats, sorted(f[:2] for f in n.files),   # noqa: E731
-                               sorted(shape(c) for c in n.dirs))
-            self.assertEqual(shape(cur), shape(fresh))                   # the same as scanning again
-            self.assertEqual(cur.child("src").nfiles, 0)
-            self.assertIsNotNone(cur.child("dst").file("big.bin"))
-            self.assertEqual(cur.nfiles, 3)
-            end = time.time() + 5                    # written back in the background
-            while core.load_snapshot(v["id"], 1000)[0].size != fresh.size and time.time() < end:
-                time.sleep(0.05)
-            self.assertEqual(core.load_snapshot(v["id"], 1000)[0].size, fresh.size)
-        finally:
-            server.VOLS.pop(v["id"], None)
+        v = self.scanned(d)
+        run("move", sources=[os.path.join(d, "src", "big.bin")], dest=os.path.join(d, "dst"))
+        run("move", sources=[os.path.join(d, "src", "keep")], dest=os.path.join(d, "dst"))
+        run("copy", sources=[os.path.join(d, "dst", "keep")], dest=d)
+        self.assert_like_fresh_scan(v)
+        cur = server.drive_state(v["id"])["cur"]
+        self.assertEqual(cur.child("src").nfiles, 0)
+        self.assertIsNotNone(cur.child("dst").file("big.bin"))
+        self.assertEqual(cur.nfiles, 3)
+        end = time.time() + 5                        # written back in the background
+        while core.load_snapshot(v["id"], 1000)[0].size != cur.size and time.time() < end:
+            time.sleep(0.05)
+        self.assertEqual(core.load_snapshot(v["id"], 1000)[0].size, cur.size)
+
+    def test_an_added_folder_inside_a_scanned_disk_updates_both(self):
+        inner = os.path.join(self.d, "inner")
+        write(os.path.join(inner, "a.bin"), b"a" * (2 << 20))
+        outer, v = self.scanned(self.d), self.scanned(inner)
+        run("mkdir", dest=inner, name="new")
+        run("move", sources=[os.path.join(inner, "a.bin")], dest=os.path.join(inner, "new"))
+        self.assert_like_fresh_scan(v)
+        self.assert_like_fresh_scan(outer)
+
+    @unittest.skipIf(WIN, "Windows scans don't see link counts")
+    def test_hard_links_measure_the_same_as_a_full_scan(self):
+        a = write(os.path.join(self.d, "a", "data.bin"), b"z" * (2 << 20))
+        os.makedirs(os.path.join(self.d, "b"))
+        os.link(a, os.path.join(self.d, "b", "data.bin"))
+        v = self.scanned(self.d)
+        run("mkfile", dest=os.path.join(self.d, "b"), name="note.txt")      # re-measures b only
+        self.assert_like_fresh_scan(v)
+        cur = server.drive_state(v["id"])["cur"]
+        self.assertEqual(cur.child("a").size + cur.child("b").size,          # note.txt is empty
+                         os.stat(a).st_blocks * 512 // 2 * 2)       # the shared bytes counted once in all
 
 
 class Critical(Base):
