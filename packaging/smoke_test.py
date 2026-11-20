@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -20,6 +21,19 @@ import time
 import urllib.request
 
 MB = 1 << 20
+
+
+def stop(proc):
+    """Stop the app and everything it started: an AppImage or one-file exe runs the real app as a child, which
+    would otherwise keep running (and keep a pipe like `smoke_test.py ... | tail` open forever)."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)       # its own process group: see start_new_session below
+        except ProcessLookupError:
+            pass
+    proc.wait()
 
 
 def fail(msg):
@@ -67,7 +81,7 @@ def main():
 
     port = free_port()
     env = dict(os.environ, HOARD_SCAN_DIR=target, HOARD_DATA_DIR=data, HOARD_EXPORT_DIR=exports)
-    proc = subprocess.Popen(args + ["--no-window", "--port", str(port)], env=env)
+    proc = subprocess.Popen(args + ["--no-window", "--port", str(port)], env=env, start_new_session=os.name != "nt")
     base = f"http://127.0.0.1:{port}"
     try:
         html = None
@@ -290,8 +304,7 @@ def main():
             fail("deleting a whole disk must be refused")
         print("SMOKE TEST PASSED")
     finally:
-        proc.kill()
-        proc.wait()
+        stop(proc)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
