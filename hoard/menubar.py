@@ -19,6 +19,21 @@ AGENT = os.path.expanduser(f"~/Library/LaunchAgents/{LABEL}.plist")
 LOCK = os.path.join(core.DATA_DIR, "menubar.lock")
 
 
+# Hoard's logo (packaging/icons/hoard.svg) without its tile: the four blocks, in the SVG's 64-unit coordinates
+LOGO = [(11, 10, 15, 44, 4), (38, 10, 15, 21, 4), (38, 34, 15, 20, 4), (28.5, 26, 7, 12, 2.5)]
+
+
+def _draw_logo(rect):
+    from AppKit import NSBezierPath, NSColor
+    s = 16 / 44                                       # the blocks span 42 x 44 units: fit them in 16 pt
+    ox, oy = (18 - 42 * s) / 2 - 11 * s, (18 - 44 * s) / 2 - 10 * s
+    NSColor.blackColor().setFill()
+    for x, y, w, h, r in LOGO:
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            ((ox + x * s, oy + y * s), (w * s, h * s)), r * s, r * s).fill()
+    return True
+
+
 def _disks():
     return [v for v in plat.list_volumes() if v["type"] in ("fixed", "removable")]
 
@@ -46,12 +61,10 @@ def run():
     class Bar(NSObject):
         def setUp(self):
             self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
-            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_("internaldrive.fill", "Hoard")
-            if img is not None:
-                img.setTemplate_(True)                # follows the light/dark menu bar
-                self.item.button().setImage_(img)
-            else:
-                self.item.button().setTitle_("Hoard")
+            img = NSImage.imageWithSize_flipped_drawingHandler_((18, 18), True, _draw_logo)
+            img.setTemplate_(True)                    # one colour that follows the light/dark menu bar
+            img.setAccessibilityDescription_("Hoard")
+            self.item.button().setImage_(img)
             self.refresh_(None)
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(EVERY_S, self, "refresh:", None, True)
 
