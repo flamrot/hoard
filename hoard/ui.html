@@ -1604,10 +1604,9 @@ function confirmRecycle(path, n) {
     try {
       const r = await api("recycle", { drive: S.drive, path });
       d.close();
+      afterChange([{ vol: S.drive, path }]);
       if (r.error) return toast(r.error, "error");
       toast(`Moved “${n.n}” to the ${bin}`, "ok", `Empty the ${bin} to free ${fmt(n.s)}.`);
-      refreshDrives();
-      await loadView(S.path);
     } catch (err) { d.close(); toast(err.message, "error"); }
   };
   d.showModal();
@@ -1932,7 +1931,11 @@ function popMenu(x, y, entries) {
 function setMode(m) {
   if (!m || S.mode === m) return;
   if (m === "files") S.fmPrev = S.mode;
-  if (S.mode === "files") window.HoardFM?.hide();
+  if (S.mode === "files") {
+    window.HoardFM?.hide();
+    refreshDrives(); S.apps = null;                       // Files jobs update the scan as they finish
+    if (S.view) loadView(S.path, { force: true });
+  }
   S.mode = m;
   document.querySelectorAll(".views button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === m));
   const isMap = m === "map", isFiles = m === "files";
@@ -1963,6 +1966,24 @@ function loadFiles() {
   js.onload = () => fmLoading.catch(() => {}).then(() => { if (S.mode === "files") window.HoardFM?.show(); });
   js.onerror = () => { fmLoading = null; css.remove(); js.remove(); $("#files").innerHTML = `<div class="empty"><b>Files couldn't load</b>Close this window and start Hoard again.</div>`; };
   document.head.append(css, js);
+}
+
+/* ------------------------------------------------------------------ after a removal or a Files job
+   Bring every view up to date where it is, without a reload. removed: [{vol, path}] that are gone. */
+function afterChange(removed = []) {
+  refreshDrives();
+  if (S.view) loadView(S.path, { force: true });          // also redraws Simple
+  if (S.mode === "apps") renderApps(true, true); else S.apps = null;
+  if (S.mode === "cleanup") renderCleanup(true); else S.cleanup = null;
+  const j = S.dupes;
+  if (j?.groups && removed.length) {
+    const vid = j.vol || j.scope.drive, under = (p, q) => q.length <= p.length && q.every((x, i) => x === p[i]);
+    const gone = removed.filter(it => it.vol === vid).map(it => it.path);
+    j.groups = j.groups.map(g => ({ ...g, files: g.files.filter(f => !gone.some(q => under(f.p, q))) }))
+      .filter(g => g.files.length > 1).map(g => ({ ...g, wasted: g.size * (g.files.length - 1) }));
+    S.dupeSel = {};
+    if (S.mode === "dupes") renderDupes();
+  }
 }
 
 /* ------------------------------------------------------------------ staging area */
@@ -2033,14 +2054,15 @@ function renderDrawer() {
     if (S.scanning) return toast("Wait for the scan to finish first.", "error");
     const b = e.currentTarget; b.disabled = true; b.innerHTML = SPIN + "Moving…";
     try {
+      const before = S.staged.items, key = it => it.vol + "\0" + it.path.join("\0");
       const r = await api("stage_trash");
+      const failed = new Set(r.failed.map(key));
       S.staged = { items: r.items, total: r.total }; renderStageBtn(); renderDrawer();
       if (r.done) toast(`Moved ${r.done} item${r.done > 1 ? "s" : ""} (${fmt(r.size)}) to the ${S.trashName}`, "ok",
         r.failed.length ? `${r.failed.length} couldn't be moved and are still listed.` : `Empty the ${S.trashName} to free the space.`,
         { label: `Empty ${S.trashName}`, run: emptyBin });
       else if (r.failed.length) toast(`Nothing was moved: ${r.failed[0].error}`, "error");
-      refreshDrives();
-      if (S.view) loadView(S.path, { force: true });
+      afterChange(before.filter(it => !failed.has(key(it))));
     } catch (err) { toast(err.message, "error"); b.disabled = false; }
   };
 }
@@ -2494,13 +2516,13 @@ function drawDupeBody() {
 
 /* ------------------------------------------------------------------ Apps */
 S.apps = null; S.appQ = ""; S.appOpen = {}; S.appSel = {};
-async function renderApps(refresh) {
+async function renderApps(refresh, quiet) {
   const p = $("#panel");
   if (!S.apps || refresh) {
-    p.innerHTML = `<div class="pwrap"><div class="loading">${SPIN}Listing installed apps…</div></div>`;
-    try { S.apps = await api("apps", { refresh: !!refresh }); } catch (e) { p.innerHTML = `<div class="pwrap"><div class="empty">${esc(e.message)}</div></div>`; return; }
+    if (!quiet || !S.apps) p.innerHTML = `<div class="pwrap"><div class="loading">${SPIN}Listing installed apps…</div></div>`;
+    try { S.apps = await api("apps", { refresh: !!refresh }); } catch (e) { if (S.mode === "apps") p.innerHTML = `<div class="pwrap"><div class="empty">${esc(e.message)}</div></div>`; return; }
   }
-  drawApps();
+  if (S.mode === "apps") drawApps();
 }
 function drawApps() {
   const p = $("#panel"), q = S.appQ.toLowerCase();
@@ -2581,7 +2603,18 @@ async function uninstallApp(a) {
     <p>When it's done, use <b>Related folders</b> to find anything it left behind.</p>`, "Start uninstaller", true);
   if (!ok) return;
   const r = await api("app_uninstall", { id: a.id });
-  if (r.error) toast(r.error, "error"); else toast(`Started the uninstaller for ${a.name}`, "ok", "Press Refresh here when it's finished.");
+  if (r.error) return toast(r.error, "error");
+  toast(`Started the uninstaller for ${a.name}`, "ok", "This list updates by itself when it's finished.");
+  watchUninstall(a, Date.now() + 15 * 60e3);
+}
+function watchUninstall(a, until) {
+  setTimeout(async () => {
+    let r;
+    try { r = await api("apps", { refresh: true }); } catch { r = null; }
+    if (!r || r.items.some(x => x.id === a.id)) { if (Date.now() < until) watchUninstall(a, until); return; }
+    toast(`${a.name} was uninstalled`, "ok");
+    afterChange();
+  }, 5000);
 }
 
 /* ------------------------------------------------------------------ "Open in Hoard" from the file manager */

@@ -626,6 +626,81 @@ def remove_from_tree(s, parts):
     s["cache"] = {}
 
 
+def replace_in_tree(s, parts, new):
+    """Put a fresh measurement of the folder at parts in place and carry the difference up to the root."""
+    chain = [s["cur"]]
+    for p in parts:
+        c = chain[-1].child(p)
+        if c is None:
+            return
+        chain.append(c)
+    old = chain[-1]
+    dsize, dn, dm, dcl = new.size - old.size, new.nfiles - old.nfiles, new.msum - old.msum, new.cloud - old.cloud
+    dcats = [a - b for a, b in zip(new.cats, old.cats)]
+    for slot in Node.__slots__:
+        if slot != "name":
+            setattr(old, slot, getattr(new, slot))
+    old._idx = None
+    for a in chain[:-1]:
+        a.size += dsize
+        a.nfiles += dn
+        a.msum += dm
+        a.cloud += dcl
+        a.cats = [x + d for x, d in zip(a.cats, dcats)]
+        a.mtime = max(a.mtime, new.mtime)
+    s["changes"] = None
+    s["cache"] = {}
+
+
+def refresh_paths(paths):
+    """Bring the saved scans up to date after files or folders changed outside a scan (Files jobs, uninstallers).
+    Each path's folder is listed again and the item itself measured again; the rest of the scan is reused."""
+    if not VOLS:
+        volumes()
+    fold = (lambda x: x) if plat.NAME == "linux" else str.casefold
+    todo = {}                                 # (vol id, folder parts) -> names in it to measure again
+    for p in paths:
+        vid, parts, _node = locate(p)
+        if vid is None or not parts or drive_state(vid)["cur"] is None:
+            continue
+        with LOCK:
+            n, depth = drive_state(vid)["cur"], 0
+            while depth < len(parts) - 1 and (c := n.child(parts[depth])) is not None:   # deepest folder in the scan
+                n, depth = c, depth + 1
+        todo.setdefault((vid, tuple(parts[:depth])), set()).add(fold(parts[depth]))
+    deep = {(vid, tuple(fold(x) for x in f) + (n,)) for (vid, f), names in todo.items() for n in names}
+    touched = set()
+    for (vid, f), names in todo.items():
+        ff = tuple(fold(x) for x in f)
+        if any((vid, ff[:i]) in deep for i in range(1, len(ff) + 1)):
+            continue                          # inside something measured again anyway
+        s, v = drive_state(vid), VOLS[vid]
+        path = full_path(vid, list(f))
+        if not os.path.isdir(path):
+            continue
+        with LOCK:
+            n, _f = walk(s["cur"], list(f))
+            if n is None:
+                continue
+            keep = {d.name: d for d in n.dirs if fold(d.name) not in names}
+        st = core.Scan(vid, 0)
+        st.exclude = {os.path.normpath(x) for x in plat.scan_excludes(v["root"])}
+        new = core.scan_dir(path, n.name, st, keep)     # outside the lock: the UI stays responsive meanwhile
+        if st.errors and not new.dirs and not new.nfiles:
+            continue                          # couldn't read the folder: keep what the scan had
+        with LOCK:
+            replace_in_tree(s, list(f), new)
+        touched.add(vid)
+    for vid in touched:
+        resave(vid)
+    if touched:
+        APPS_CACHE["t"] = 0                   # app sizes come from the scan
+    return bool(touched)
+
+
+fm.HOOKS["changed"] = refresh_paths
+
+
 def save_report(vid, v, tree, now, prev, prev_ts, changes, folder, parts=()):
     node, _ = walk(tree, list(parts))
     sep = os.sep
@@ -681,11 +756,9 @@ def staged_trash():
             ok, err = trash_any(it["vol"], it["path"], expect)
             if not ok:
                 raise ValueError(err)
-            if err == "gone":
-                done.append(it)       # already gone
-                continue
             done.append(it)
-            freed += it["size"]
+            if err != "gone":         # already gone: nothing freed, but the scan still shouldn't show it
+                freed += it["size"]
             if list_snaps(it["vol"]):
                 with LOCK:
                     remove_from_tree(drive_state(it["vol"]), it["path"])
@@ -695,6 +768,7 @@ def staged_trash():
     core.write_staged(failed)
     for vid in touched:
         resave(vid)
+    APPS_CACHE["t"] = 0               # an app may have gone (macOS uninstall), and app sizes come from the scan
     return {"done": len(done), "failed": failed, "size": freed}
 
 
@@ -1140,12 +1214,13 @@ class Handler(BaseHTTPRequestHandler):
         ok, err = trash_any(vid, parts, expect)
         if not ok:
             return {"error": err}
-        if err == "gone":
-            return {"error": "That item no longer exists."}
         s = drive_state(vid)
         with LOCK:
             remove_from_tree(s, parts)
         resave(vid)
+        APPS_CACHE["t"] = 0
+        if err == "gone":
+            return {"error": "That item no longer exists."}
         return {"ok": True}
 
     def api_info(self, b):
@@ -1379,6 +1454,11 @@ class Handler(BaseHTTPRequestHandler):
         if time.time() - APPS_CACHE["t"] > 120:
             volumes()
             items = plat.installed_apps()
+            now = {a.get("location") for a in items}
+            gone = [a["location"] for a in APPS_CACHE["items"]           # uninstalled since the last listing:
+                    if a.get("location") and a["location"] not in now]  # measure what's left of its folder
+            if gone:
+                refresh_paths(gone)
             for a in items:
                 size = None
                 if a.get("location"):

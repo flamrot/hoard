@@ -192,6 +192,35 @@ class Listing(Base):
             self.assertEqual(fm.fm_read({"path": os.path.join(self.d, "z.txt:stream")}), {"error": "Bad path."})
 
 
+class ScanFollowsJobs(Base):
+    def test_jobs_update_the_saved_scan(self):
+        d, big = os.path.realpath(self.d), 2 << 20
+        write(os.path.join(d, "src", "big.bin"), b"x" * big)
+        write(os.path.join(d, "src", "keep", "small.txt"), b"y" * 100)
+        os.makedirs(os.path.join(d, "dst"))
+        v = server.location_volume(d)
+        server.VOLS[v["id"]] = v
+        server.STATE.pop(v["id"], None)
+        core.save_snapshot(v["id"], core.scan_volume(v, core.Scan(v["id"], 0)), 1000, root=d)
+        try:
+            run("move", sources=[os.path.join(d, "src", "big.bin")], dest=os.path.join(d, "dst"))
+            run("move", sources=[os.path.join(d, "src", "keep")], dest=os.path.join(d, "dst"))
+            run("copy", sources=[os.path.join(d, "dst", "keep")], dest=d)
+            cur, fresh = server.drive_state(v["id"])["cur"], core.scan_volume(v, core.Scan(v["id"], 0))
+            shape = lambda n: (n.name, n.size, n.nfiles, n.cats, sorted(f[:2] for f in n.files),   # noqa: E731
+                               sorted(shape(c) for c in n.dirs))
+            self.assertEqual(shape(cur), shape(fresh))                   # the same as scanning again
+            self.assertEqual(cur.child("src").nfiles, 0)
+            self.assertIsNotNone(cur.child("dst").file("big.bin"))
+            self.assertEqual(cur.nfiles, 3)
+            end = time.time() + 5                    # written back in the background
+            while core.load_snapshot(v["id"], 1000)[0].size != fresh.size and time.time() < end:
+                time.sleep(0.05)
+            self.assertEqual(core.load_snapshot(v["id"], 1000)[0].size, fresh.size)
+        finally:
+            server.VOLS.pop(v["id"], None)
+
+
 class Critical(Base):
     def test_profile_core_folders_and_hoard_data(self):
         docs = plat.documents_dir()

@@ -35,7 +35,8 @@ import safefs
 # Set by server.py (avoids a circular import):
 #   scan(path) -> (node or None, scan time or None)   Hoard's last scan of the folder at path
 #   volumes() -> [volume dicts]                         connected disks and added folders
-HOOKS = {"scan": None, "volumes": None}
+#   changed(paths)                                      bring that scan up to date after a job changed paths
+HOOKS = {"scan": None, "volumes": None, "changed": None}
 
 MAX_ROWS, MAX_BRANCH, MAX_FIND = 200_000, 50_000, 20_000
 MAX_READ = 1 << 20
@@ -372,6 +373,7 @@ class Job:
         self.force = None
         self.created, self.finished = time.time(), None
         self.entry = None                                   # undo journal entry, once something changed
+        self.touched = []                                   # paths it may change, to update Hoard's scan after
         self._go = threading.Event()
         self._go.set()
         self._answered = threading.Event()
@@ -523,6 +525,12 @@ def _run(job, fn):
             job.error(job.current, _plain(ex) if isinstance(ex, OSError) else str(ex))
             final = "failed"
     job.question = None
+    if job.mutating and job.touched and HOOKS["changed"]:      # even when cancelled: part of it may be done
+        job.current = "Updating Hoard's scan"
+        try:
+            HOOKS["changed"](job.touched)
+        except Exception:  # noqa: BLE001
+            core.log_error("scan update after a files job", traceback.format_exc())
     job.current = ""
     if job.mutating:                          # mutation result: counts plus whatever the operation added
         job.result = dict({"result": None}, **(job.result or {}), completed=job.counts["done"],
@@ -1063,6 +1071,9 @@ def fm_start(b):
     job.mode, job.preserve, job.total_items = mode, plan["preserveTimes"], len(items)
     job.total_n = len(items)
     job.total_b = sum(it.get("size") or 0 for it in items)
+    job.touched = [it["dst"] for it in items if it.get("dst")]
+    if plan["op"] in ("move", "trash", "delete", "rename", "rename_many", "sync"):     # these change the source too
+        job.touched += [it["src"] for it in items if it.get("src")]
     _submit(job, lambda j: _EXEC[plan["op"]](j, plan, items))
     return {"job": job.id}
 
@@ -1870,6 +1881,7 @@ def fm_undo(b):
         raise FmError("Wait for that operation to finish first.")
     job = Job("undo", f"Undoing: {entry.get('summary', '')}")
     job.undoing = jid
+    job.touched = [a[k] for a in entry["actions"] for k in ("from", "to", "path") if a.get(k)]
     job.total_items = len([a for a in entry["actions"] if not a.get("ok")])
     _submit(job, lambda j: _exec_undo(j, entry))
     return {"job": job.id}

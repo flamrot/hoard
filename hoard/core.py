@@ -118,7 +118,8 @@ class Scan:
         self.seen = set()          # (device, inode) of hard-linked files already counted
 
 
-def scan_dir(path, name, st):
+def scan_dir(path, name, st, keep=None):
+    """Measure a folder. keep: {name: Node} of subfolders known to be unchanged, reused instead of rescanned."""
     node = Node(name)
     kept = []
     size_of = plat.size_of
@@ -137,7 +138,9 @@ def scan_dir(path, name, st):
                 if e.is_dir(follow_symlinks=False):
                     if e.is_junction() or e.is_symlink() or (exclude and e.path in exclude):
                         continue
-                    c = scan_dir(e.path, e.name, st)
+                    c = keep.get(e.name) if keep else None
+                    if c is None:
+                        c = scan_dir(e.path, e.name, st)
                     node.dirs.append(c)
                     node.size += c.size
                     node.nfiles += c.nfiles
