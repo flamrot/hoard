@@ -3,6 +3,7 @@ Run:  python -m unittest discover -s tests -v
 Works only inside temporary folders and a temporary data folder; nothing outside them is changed. Paths like
 C:\\Windows are only ever *planned* (and refused), never acted on."""
 import os
+import stat
 import sys
 import tempfile
 import time
@@ -1033,6 +1034,936 @@ class Hardening(Base):
         fm.fm_decide({"job": jid, "answer": "skip"})
         wait(jid)
         self.assertFalse(fm.busy())
+
+
+class zero_ids:
+    """Make one folder report file id 0 everywhere (os.lstat/stat/fstat), like a FAT/exFAT drive root or a share
+    without ids. Matched by its real identity, so every way of reaching it is covered."""
+    BASE = {"st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size"}
+
+    def __init__(self, path):
+        st = os.lstat(path)
+        self.target = (st.st_dev, st.st_ino)
+
+    def _zero(self, st):
+        if (st.st_dev, st.st_ino) != self.target:
+            return st
+        extra = {n: getattr(st, n) for n in dir(st) if n.startswith("st_") and n not in self.BASE}
+        seq = list(st)
+        seq[1] = 0
+        return os.stat_result(seq, extra)
+
+    def __enter__(self):
+        self.orig = os.lstat, os.stat, os.fstat
+        lstat, stat_, fstat = self.orig
+        os.lstat = lambda *a, **kw: self._zero(lstat(*a, **kw))
+        os.stat = lambda *a, **kw: self._zero(stat_(*a, **kw))
+        os.fstat = lambda *a, **kw: self._zero(fstat(*a, **kw))
+        return self
+
+    def __exit__(self, *exc):
+        os.lstat, os.stat, os.fstat = self.orig
+
+
+def _exfat_d():
+    """D:\\ when it's a FAT/exFAT drive on this Windows machine, else None."""
+    if not WIN or not os.path.isdir("D:\\"):
+        return None
+    import ctypes
+    buf = ctypes.create_unicode_buffer(64)
+    if not ctypes.windll.kernel32.GetVolumeInformationW("D:\\", None, 0, None, None, None, buf, 64):
+        return None
+    return "D:\\" if buf.value.upper() in ("FAT", "FAT32", "EXFAT") else None
+
+
+class IdlessDisks(Base):
+    """Copy/move into a folder whose file id is 0 (exFAT drive roots, some shares): ids are compared only when
+    both are real; the disk, the type and the held path tie the rest together."""
+
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.realpath(self.d)
+        self.root = os.path.join(self.d, "root")              # stands in for the drive root
+        os.makedirs(self.root)
+
+    def test_copy_into_a_folder_without_file_ids(self):
+        src = write(os.path.join(self.d, "src", "a.txt"), b"a")
+        write(os.path.join(self.d, "src", "tree", "b.txt"), b"b")
+        with zero_ids(self.root):
+            self.assertEqual(fm.plat.identity(self.root)[1], 0)
+            j = run("copy", sources=[src, os.path.join(self.d, "src", "tree")], dest=self.root)
+        self.assertEqual(j.errors, [])
+        self.assertEqual(read(os.path.join(self.root, "a.txt")), b"a")
+        self.assertEqual(read(os.path.join(self.root, "tree", "b.txt")), b"b")
+        with zero_ids(self.root):
+            u = wait(fm.fm_undo({"journal": j.journal})["job"])
+        self.assertEqual(u.errors, [])
+        self.assertEqual(os.listdir(self.root), [])
+
+    def test_move_into_a_folder_without_file_ids(self):
+        src = write(os.path.join(self.d, "src", "m.txt"), b"m")
+        with zero_ids(self.root):
+            j = run("move", sources=[src], dest=self.root)
+            self.assertEqual(j.errors, [])
+            with other_disk():
+                j2 = run("move", sources=[os.path.join(self.root, "m.txt")], dest=os.path.join(self.d, "src"))
+        self.assertEqual(j2.errors, [])
+        self.assertEqual(read(src), b"m")
+
+    def test_a_changed_destination_is_still_refused(self):
+        src = write(os.path.join(self.d, "src", "a.txt"), b"a")
+        with zero_ids(self.root):
+            p = plan("copy", sources=[src], dest=self.root)
+            os.rmdir(self.root)
+            write(self.root, b"now a file")                    # same path, different type
+            j = wait(fm.fm_start({"plan": p["plan"]})["job"])
+        self.assertIn("changed", j.errors[0]["message"])
+        self.assertEqual(read(self.root), b"now a file")
+
+    @unittest.skipUnless(_exfat_d(), "needs D:\\ formatted FAT/exFAT")
+    def test_real_copy_and_move_into_an_exfat_drive_root(self):
+        import uuid
+        tag = uuid.uuid4().hex[:8]
+        name = f"hoard-test-{tag}.txt"
+        folder = f"D:\\hoard-test-{tag}"
+        src = write(os.path.join(self.d, name), b"exfat")
+        try:
+            j = run("copy", sources=[src], dest="D:\\", conflict="skip")
+            self.assertEqual(j.errors, [])
+            self.assertEqual(read("D:\\" + name), b"exfat")
+            os.makedirs(folder)
+            moved = write(os.path.join(folder, "moved-" + name), b"move")
+            j = run("move", sources=[moved], dest="D:\\", conflict="skip")
+            self.assertEqual(j.errors, [])
+            self.assertEqual(read("D:\\moved-" + name), b"move")
+        finally:
+            for p in ("D:\\" + name, "D:\\moved-" + name, os.path.join(folder, "moved-" + name)):
+                if os.path.isfile(p):
+                    os.remove(p)
+            if os.path.isdir(folder):
+                os.rmdir(folder)
+
+
+def side_job(r):
+    """Wait for a side job started by an endpoint; returns the job."""
+    assert "job" in r, r
+    return wait(r["job"])
+
+
+def results(rid, **kw):
+    r = fm.fm_results(dict(result=rid, **kw))
+    assert "error" not in r, r
+    return r
+
+
+class CompareFixture(Base):
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.realpath(self.d)
+        self.L, self.R = os.path.join(self.d, "L"), os.path.join(self.d, "R")
+        t = time.time() - 10000
+        for side in (self.L, self.R):
+            write(os.path.join(side, "same.txt"), b"same", t)
+        write(os.path.join(self.L, "newer.txt"), b"left", t + 500)
+        write(os.path.join(self.R, "newer.txt"), b"right!", t)
+        write(os.path.join(self.L, "older.txt"), b"old", t)
+        write(os.path.join(self.R, "older.txt"), b"new", t + 500)
+        write(os.path.join(self.L, "size.txt"), b"1", t)
+        write(os.path.join(self.R, "size.txt"), b"22", t)
+        write(os.path.join(self.L, "content.txt"), b"abc", t)       # same size and time, different bytes
+        write(os.path.join(self.R, "content.txt"), b"xyz", t)
+        write(os.path.join(self.L, "touched.txt"), b"one", t)       # same bytes, different time
+        write(os.path.join(self.R, "touched.txt"), b"one", t + 500)
+        write(os.path.join(self.L, "only-left.txt"), b"L", t)
+        write(os.path.join(self.R, "only-right.txt"), b"R", t)
+        write(os.path.join(self.L, "sub", "deep.txt"), b"d", t)
+        write(os.path.join(self.R, "sub", "deep.txt"), b"d", t)
+
+    def compare(self, **kw):
+        j = side_job(fm.fm_compare(dict(left=self.L, right=self.R, **kw)))
+        self.assertEqual(j.state, "done", j.errors)
+        self.assertTrue(j.result["complete"])
+        rows = results(j.result["result"], limit=500)["rows"]
+        return j.result["result"], {r["rel"]: r for r in rows}
+
+
+class Compare(CompareFixture):
+    def test_quick_statuses(self):
+        rid, rows = self.compare(mode="quick")
+        st = {k: v["status"] for k, v in rows.items()}
+        self.assertEqual(st["same.txt"], "same")
+        self.assertIn("contents not checked", rows["same.txt"]["reason"])
+        self.assertEqual((st["newer.txt"], st["older.txt"], st["size.txt"]), ("newer_left", "newer_right", "different"))
+        self.assertEqual(st["content.txt"], "same")                     # quick can't see it
+        self.assertEqual(st["touched.txt"], "newer_right")
+        self.assertEqual((st["only-left.txt"], st["only-right.txt"]), ("only_left", "only_right"))
+        self.assertEqual(st["sub"], "not_compared")                      # not recursive
+        self.assertEqual(rows["sub"]["reason"], "Not compared: folder contents.")
+        self.assertIsNone(rows["only-left.txt"]["right"])
+
+    def test_thorough_uses_contents(self):
+        _rid, rows = self.compare(mode="thorough", recursive=True)
+        self.assertEqual(rows["content.txt"]["status"], "different")
+        self.assertEqual(rows["touched.txt"]["status"], "same")         # equal hashes win over times
+        self.assertEqual(rows["sub"]["status"], "same")                 # folder: everything inside is the same
+        self.assertEqual(rows[os.path.join("sub", "deep.txt")]["status"], "same")
+        write(os.path.join(self.R, "sub", "extra.txt"), b"x")
+        _rid, rows = self.compare(mode="thorough", recursive=True)
+        self.assertEqual((rows["sub"]["status"], rows["sub"]["reason"]), ("different", "Contents differ."))
+
+    def test_results_filter_and_tags(self):
+        rid, _rows = self.compare()
+        diffs = results(rid, filter="differences")
+        self.assertEqual(diffs["total"], 6)
+        r = results(rid, tagAction="differences")
+        tagged = {x["rel"] for x in results(rid, filter="tagged")["rows"]}
+        self.assertEqual(tagged, {"newer.txt", "older.txt", "size.txt", "touched.txt", "only-left.txt", "only-right.txt"})
+        self.assertEqual(r["selected"], 6)
+        self.assertEqual(results(rid, tagAction="clear")["selected"], 0)
+        self.assertEqual(len(results(rid, offset=2, limit=3)["rows"]), 3)
+
+    def test_case_rules_and_collisions(self):
+        write(os.path.join(self.L, "Readme.md"), b"1")
+        write(os.path.join(self.R, "README.md"), b"1")
+        _rid, rows = self.compare()
+        if fm._case_insensitive(self.L) or fm._case_insensitive(self.R):
+            self.assertIn("Readme.md", rows)                             # matched as one item
+            self.assertIsNotNone(rows["Readme.md"]["right"])
+        else:
+            self.assertEqual((rows["Readme.md"]["status"], rows["README.md"]["status"]), ("only_left", "only_right"))
+        orig = fm._walk_side
+
+        def with_twin(job, root, recursive, hidden):              # two names differing only in case on one side
+            ents, bad = orig(job, root, recursive, hidden)
+            if root == self.L:
+                ents["SAME.TXT"] = ents["same.txt"]
+            return ents, bad
+        fm._walk_side = with_twin
+        old_fold = fm._case_insensitive
+        fm._case_insensitive = lambda folder: True
+        try:
+            rid, rows = self.compare()
+        finally:
+            fm._walk_side, fm._case_insensitive = orig, old_fold
+        self.assertEqual(rows["same.txt"]["status"], "not_compared")
+        self.assertIn("differ only in case", rows["same.txt"]["reason"])
+        results(rid, tagAction="set", tagIds=[rows["same.txt"]["id"]])
+        p = fm.fm_sync_plan({"comparison": rid, "scope": "tags", "actions": [{"id": rows["same.txt"]["id"], "action": "lr"}]})
+        self.assertEqual(p["items"], [])
+        self.assertIn("differ only in case", p["blocked"][0]["reason"])
+
+    def test_overlapping_roots_refused(self):
+        self.assertIn("error", fm.fm_compare({"left": self.L, "right": self.L}))
+        self.assertIn("error", fm.fm_compare({"left": self.L, "right": os.path.join(self.L, "sub")}))
+
+
+class Sync(CompareFixture):
+    def sync_plan(self, rid, **kw):
+        p = fm.fm_sync_plan(dict(comparison=rid, scope="differences", **kw))
+        self.assertNotIn("error", p)
+        return p
+
+    def test_directions_and_defaults(self):
+        rid, rows = self.compare()
+        p = self.sync_plan(rid)
+        acts = {os.path.basename(i["src"]): i["action"] for i in p["items"]}
+        self.assertEqual(acts, {"newer.txt": "lr", "older.txt": "rl", "touched.txt": "rl", "only-left.txt": "lr",
+                                "only-right.txt": "rl"})                # 'different' (size.txt) is skipped
+        self.assertEqual(p["directions"]["lr"]["n"], 2)
+        self.assertEqual(p["directions"]["rl"]["n"], 3)
+        self.assertEqual(p["directions"]["trash"]["n"], 0)              # trash-missing is off by default
+        self.assertEqual(p["result"], rid)
+        p = self.sync_plan(rid, deleteFrom="right")
+        acts = {os.path.basename(i["src"]): i["action"] for i in p["items"]}
+        self.assertEqual(acts["only-right.txt"], "trash")
+        p = self.sync_plan(rid, actions=[{"id": rows["size.txt"]["id"], "action": "lr"}])
+        self.assertIn("size.txt", {os.path.basename(i["src"]) for i in p["items"]})
+
+    def test_apply_and_undo(self):
+        rid, _rows = self.compare()
+        p = self.sync_plan(rid, deleteFrom="right")
+        j = wait(fm.fm_start({"plan": p["plan"]})["job"])
+        self.assertEqual(j.errors, [])
+        self.assertEqual(read(os.path.join(self.R, "newer.txt")), b"left")
+        self.assertEqual(read(os.path.join(self.L, "older.txt")), b"new")
+        self.assertEqual(read(os.path.join(self.R, "only-left.txt")), b"L")
+        self.assertFalse(os.path.exists(os.path.join(self.R, "only-right.txt")))     # in the Trash
+        self.assertEqual((j.result["completed"], j.result["bytesLR"] > 0), (5, True))
+        u = wait(fm.fm_undo({"journal": j.journal})["job"])
+        self.assertEqual(u.errors, [])
+        self.assertEqual(read(os.path.join(self.R, "newer.txt")), b"right!")
+        self.assertEqual(read(os.path.join(self.L, "older.txt")), b"old")
+        self.assertFalse(os.path.exists(os.path.join(self.R, "only-left.txt")))
+        self.assertEqual(read(os.path.join(self.R, "only-right.txt")), b"R")
+
+    def test_protected_destination_blocked(self):
+        rid, _rows = self.compare()
+        with protect(trees=[self.R]):
+            p = self.sync_plan(rid)
+        self.assertTrue(all(i["action"] == "rl" for i in p["items"]))
+        self.assertEqual(len(p["blocked"]), 2)
+        self.assertTrue(all("test tree" in b["reason"] for b in p["blocked"]))
+
+    def test_changed_input_pauses(self):
+        rid, _rows = self.compare()
+        p = self.sync_plan(rid)
+        write(os.path.join(self.L, "newer.txt"), b"edited after comparing")
+        jid = fm.fm_start({"plan": p["plan"]})["job"]
+        q = wait_question(jid)
+        self.assertEqual(q["message"], fm.SYNC_CHANGED)
+        fm.fm_decide({"job": jid, "answer": "skip"})
+        j = wait(jid)
+        self.assertEqual(read(os.path.join(self.R, "newer.txt")), b"right!")      # not replaced
+        self.assertEqual(j.counts["skipped"], 1)
+
+    def test_sync_into_a_folder_without_file_ids(self):
+        rid, _rows = self.compare()
+        p = self.sync_plan(rid)
+        with zero_ids(self.R):
+            j = wait(fm.fm_start({"plan": p["plan"]})["job"])
+        self.assertEqual(j.errors, [])
+        self.assertEqual(read(os.path.join(self.R, "only-left.txt")), b"L")
+
+    def test_incomplete_results_block_sync(self):
+        rid, _rows = self.compare()
+        fm.RESULTS[rid]["complete"] = False
+        self.assertIn("incomplete", fm.fm_sync_plan({"comparison": rid})["error"])
+
+
+class ArchiveFixture(Base):
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.realpath(self.d)
+        self.src = os.path.join(self.d, "proj")
+        write(os.path.join(self.src, "a.txt"), b"alpha" * 100, time.time() - 5000)
+        write(os.path.join(self.src, "docs", "b.md"), b"beta")
+        os.makedirs(os.path.join(self.src, "empty"))
+
+    def open_archive(self, path):
+        j = side_job(fm.fm_archive_open({"path": path}))
+        return j
+
+    def make_zip(self, name, entries, method=None):
+        import zipfile
+        p = os.path.join(self.d, name)
+        with zipfile.ZipFile(p, "w", method or zipfile.ZIP_DEFLATED) as zf:
+            for e in entries:
+                if isinstance(e, tuple):
+                    zi, data = e
+                    zi.compress_type = method or zipfile.ZIP_DEFLATED
+                    zf.writestr(zi, data)
+                else:
+                    zf.writestr(e, b"x")
+        return p
+
+    def refused(self, path, words):
+        a = self.open_archive(path)
+        self.assertEqual(a.state, "failed")
+        self.assertIn(words, a.errors[-1]["message"])
+        self.assertIsNone(a.result)
+
+
+class Archives(ArchiveFixture):
+    def test_pack_browse_extract_round_trip(self):
+        dest = os.path.join(self.d, "out")
+        os.makedirs(dest)
+        j = run("pack", sources=[self.src], dest=dest, name="proj.zip")
+        self.assertEqual(j.errors, [])
+        z = os.path.join(dest, "proj.zip")
+        a = self.open_archive(z)
+        self.assertEqual(a.state, "done", a.errors)
+        rid = a.result["result"]
+        self.assertEqual(a.result["archive"]["members"], 5)
+        top = fm.fm_archive_list({"archive": rid, "inner": ""})
+        self.assertEqual([r["n"] for r in top["rows"]], ["proj"])
+        inner = fm.fm_archive_list({"archive": rid, "inner": "proj"})
+        self.assertEqual([r["n"] for r in inner["rows"]], ["docs", "empty", "a.txt"])
+        self.assertTrue(all(r["ro"] for r in inner["rows"]))
+        self.assertEqual(inner["crumbs"][-1], {"n": "proj", "inner": "proj"})
+        import base64
+        r = fm.fm_archive_read({"archive": rid, "member": "proj/docs/b.md"})
+        self.assertEqual((base64.b64decode(r["data"]), r["eof"]), (b"beta", True))
+        out = os.path.join(self.d, "extracted")
+        os.makedirs(out)
+        j = run("extract", archive=rid, members=["proj"], dest=out)
+        self.assertEqual(j.errors, [])
+        self.assertEqual(read(os.path.join(out, "proj", "a.txt")), b"alpha" * 100)
+        self.assertTrue(os.path.isdir(os.path.join(out, "proj", "empty")))
+        self.assertAlmostEqual(os.path.getmtime(os.path.join(out, "proj", "a.txt")),
+                               os.path.getmtime(os.path.join(self.src, "a.txt")), delta=2)
+        j2 = run("extract", archive=rid, members=["proj/docs/b.md"], dest=out)     # relative to its folder
+        self.assertEqual(read(os.path.join(out, "b.md")), b"beta")
+        u = wait(fm.fm_undo({"journal": j.journal})["job"])
+        self.assertEqual(u.errors, [])
+        wait(fm.fm_undo({"journal": j2.journal})["job"])
+        self.assertEqual(os.listdir(out), [])
+        u = wait(fm.fm_undo({"journal": fm.JOBS[[k for k, v in fm.JOBS.items() if v.op == "pack"][-1]].journal})["job"])
+        self.assertFalse(os.path.exists(z))
+
+    def test_tar_gz(self):
+        import tarfile
+        p = os.path.join(self.d, "proj.TAR.GZ")
+        with tarfile.open(p, "w:gz") as tf:
+            tf.add(self.src, arcname="proj")
+        a = self.open_archive(p)
+        self.assertEqual(a.state, "done", a.errors)
+        out = os.path.join(self.d, "out")
+        os.makedirs(out)
+        j = run("extract", archive=a.result["result"], members=[], dest=out)
+        self.assertEqual(j.errors, [])
+        self.assertEqual(read(os.path.join(out, "proj", "docs", "b.md")), b"beta")
+
+    def test_extract_into_a_folder_without_file_ids(self):
+        import tarfile
+        p = os.path.join(self.d, "p.tar")
+        with tarfile.open(p, "w") as tf:
+            tf.add(self.src, arcname="proj")
+        rid = self.open_archive(p).result["result"]
+        out = os.path.join(self.d, "root")
+        os.makedirs(out)
+        with zero_ids(out):
+            j = run("extract", archive=rid, members=["proj/a.txt"], dest=out)
+        self.assertEqual(j.errors, [])
+        self.assertTrue(os.path.exists(os.path.join(out, "a.txt")))
+
+    def test_refuses_zip_slip_absolute_and_links(self):
+        import zipfile
+        import tarfile
+        self.refused(self.make_zip("slip.zip", ["ok.txt", "../evil.txt"]), "outside")
+        self.refused(self.make_zip("slip2.zip", ["a/..\\..\\evil.txt"]), "outside")
+        self.refused(self.make_zip("abs.zip", ["/etc/evil"]), "absolute")
+        self.refused(self.make_zip("drive.zip", ["C:/evil.txt"]), "absolute")
+        zi = zipfile.ZipInfo("link")
+        zi.external_attr = (stat.S_IFLNK | 0o777) << 16
+        self.refused(self.make_zip("link.zip", [(zi, b"/etc/passwd")]), "link")
+        self.refused(self.make_zip("dup.zip", ["a.txt", "A.TXT"]), "same name")
+        p = os.path.join(self.d, "link.tar")
+        with tarfile.open(p, "w") as tf:
+            ti = tarfile.TarInfo("evil")
+            ti.type, ti.linkname = tarfile.SYMTYPE, "/etc/passwd"
+            tf.addfile(ti)
+        self.refused(p, "link")
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.d), "evil.txt")))
+
+    def test_refuses_zip_bomb_and_encrypted(self):
+        import zipfile
+        self.refused(self.make_zip("bomb.zip", [(zipfile.ZipInfo("zeros.bin"), b"\0" * (8 << 20))],
+                                   zipfile.ZIP_BZIP2), "limits")
+        p = self.make_zip("enc.zip", [(zipfile.ZipInfo("secret.txt"), b"x")], zipfile.ZIP_STORED)
+        raw = bytearray(read(p))                            # mark it encrypted (zipfile won't write that flag)
+        raw[6] |= 0x1                                       # local header flags
+        cd = raw.index(b"PK\x01\x02")
+        raw[cd + 8] |= 0x1                                  # central directory flags
+        with open(p, "wb") as f:
+            f.write(raw)
+        self.refused(p, "encrypted")
+
+    def test_pack_never_follows_links_and_blocks_duplicates(self):
+        outside = os.path.join(self.d, "outside")
+        write(os.path.join(outside, "secret.txt"), b"s")
+        make_junction(os.path.join(self.src, "link"), outside)
+        dest = os.path.join(self.d, "out")
+        os.makedirs(dest)
+        j = run("pack", sources=[self.src], dest=dest, name="p.zip")
+        self.assertTrue(any("link" in e["message"] for e in j.errors))
+        import zipfile
+        with zipfile.ZipFile(os.path.join(dest, "p.zip")) as zf:
+            self.assertFalse([n for n in zf.namelist() if "secret" in n])
+        other = os.path.join(self.d, "x", "proj")
+        os.makedirs(other)
+        p = plan("pack", sources=[self.src, other], dest=dest, name="q.zip")
+        self.assertIn("same name", p["blocked"][0]["reason"])
+
+
+class Checksums(Base):
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.realpath(self.d)
+        self.a = write(os.path.join(self.d, "a.txt"), b"alpha")
+        self.b = write(os.path.join(self.d, "b.txt"), b"beta")
+        import hashlib
+        self.sa = hashlib.sha256(b"alpha").hexdigest()
+        self.sb = hashlib.sha256(b"beta").hexdigest()
+
+    def check(self, **kw):
+        j = side_job(fm.fm_checksums(kw))
+        self.assertEqual(j.state, "done", j.errors)
+        return j, {os.path.basename(r["path"]): r for r in results(j.result["result"])["rows"]}
+
+    def test_compute(self):
+        import hashlib
+        _j, rows = self.check(paths=[self.a, self.b, self.d], algorithm="SHA-256")
+        self.assertEqual((rows["a.txt"]["digest"], rows["a.txt"]["status"]), (self.sa, "done"))
+        self.assertEqual(rows[os.path.basename(self.d)]["status"], "excluded")
+        _j, rows = self.check(paths=[self.a], algorithm="md5")
+        self.assertEqual(rows["a.txt"]["digest"], hashlib.md5(b"alpha").hexdigest())
+        self.assertEqual(fm.fm_checksums({"paths": [self.d]})["error"], "Choose at least one regular file.")
+
+    def test_verify_gnu_and_bsd(self):
+        c = write(os.path.join(self.d, "c.txt"), b"gamma")
+        gnu = write(os.path.join(self.d, "sums.sha256"), f"{self.sa}  a.txt\n{'0' * 64} *b.txt\n".encode())
+        _j, rows = self.check(paths=[self.a, self.b, c], expected={"file": gnu})
+        self.assertEqual({k: v["status"] for k, v in rows.items()}, {"a.txt": "match", "b.txt": "mismatch", "c.txt": "missing"})
+        bsd = write(os.path.join(self.d, "SHA256SUMS"), f"SHA256 (b.txt) = {self.sb}\n".encode())
+        _j, rows = self.check(paths=[self.b], expected={"file": bsd})
+        self.assertEqual(rows["b.txt"]["status"], "match")
+        _j, rows = self.check(paths=[self.a], expected={"value": self.sa.upper(), "path": self.a})
+        self.assertEqual(rows["a.txt"]["status"], "match")
+        self.assertEqual(fm.fm_checksums({"paths": [self.a], "expected": {"value": "abc", "path": self.a}})["error"],
+                         "That checksum isn't valid for SHA-256.")
+
+    def test_traversal_and_absolute_references_refused(self):
+        for ref in ("../a.txt", "sub/../../a.txt", "/etc/passwd", "C:\\Windows\\win.ini"):
+            bad = write(os.path.join(self.d, "bad.sha256"), f"{self.sa}  {ref}\n".encode())
+            r = fm.fm_checksums({"paths": [self.a], "expected": {"file": bad}})
+            self.assertIn("outside its folder", r["error"], ref)
+
+    def test_save_checksum_files(self):
+        j, _rows = self.check(paths=[self.a, self.b])
+        p = plan("checksum_save", result=j.result["result"], algorithm="sha256")
+        self.assertEqual([os.path.basename(i["dst"]) for i in p["items"]], ["checksums.sha256"])
+        s = wait(fm.fm_start({"plan": p["plan"]})["job"])
+        self.assertEqual(s.errors, [])
+        out = os.path.join(self.d, "checksums.sha256")
+        self.assertEqual(read(out).decode(), f"{self.sa}  a.txt\n{self.sb}  b.txt\n")
+        _j, rows = self.check(paths=[self.a, self.b], expected={"file": out})           # it verifies itself
+        self.assertEqual({v["status"] for v in rows.values()}, {"match"})
+        wait(fm.fm_undo({"journal": s.journal})["job"])
+        self.assertFalse(os.path.exists(out))
+
+
+class Editor(Base):
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.realpath(self.d)
+
+    def open_(self, path):
+        r = fm.fm_edit_open({"path": path})
+        self.assertNotIn("error", r)
+        return r
+
+    def save(self, path, opened, text=None, encoding=None, bom=None):
+        import base64
+        data = opened["data"] if text is None else base64.b64encode(text.encode("utf-8")).decode()
+        return fm.fm_plan({"op": "edit_save", "sources": [path], "version": opened["version"], "data": data,
+                           "encoding": encoding or opened["encoding"], "bom": opened["bom"] if bom is None else bom})
+
+    def round_trip(self, raw, encoding, bom):
+        import base64
+        p = write(os.path.join(self.d, f"f-{encoding}-{bom}.txt"), raw)
+        o = self.open_(p)
+        self.assertEqual((o["encoding"], o["bom"], o["binary"], o["tooLarge"], o["writable"]), (encoding, bom, False, False, True))
+        text = base64.b64decode(o["data"]).decode("utf-8")
+        pl = self.save(p, o, text + "!")                              # an edit, saved in the same encoding
+        self.assertNotIn("error", pl)
+        j = wait(fm.fm_start({"plan": pl["plan"]})["job"])
+        self.assertEqual(j.errors, [])
+        self.assertEqual(read(p), raw + "!".encode(encoding))
+        return p, j
+
+    def test_encodings_round_trip(self):
+        self.round_trip(b"one\r\ntwo\nthree\rfour", "utf-8", False)       # mixed line endings kept exactly
+        self.round_trip(b"\xef\xbb\xbfh\xc3\xa9llo\r\n", "utf-8", True)
+        self.round_trip(b"\xff\xfe" + "hé\r\n".encode("utf-16-le"), "utf-16-le", True)
+        self.round_trip(b"\xfe\xff" + "hé\n".encode("utf-16-be"), "utf-16-be", True)
+        self.round_trip("plain text here".encode("utf-16-le"), "utf-16-le", False)
+        self.round_trip(b"caf\xe9 cr\xe8me\n", "latin-1", False)
+        o = self.open_(write(os.path.join(self.d, "mixed.txt"), b"a\r\nb\nc\r\n"))
+        self.assertEqual((o["endings"]["main"], o["endings"]["mixed"]), ("CRLF", True))
+
+    def test_latin1_unrepresentable_and_flags(self):
+        p = write(os.path.join(self.d, "l1.txt"), b"caf\xe9")
+        r = self.save(p, self.open_(p), "price: 5 \u20ac")
+        self.assertEqual(r.get("code"), "needs_utf8")
+        self.assertNotIn("error", self.save(p, self.open_(p), "price: 5 \u20ac", encoding="utf-8"))
+        self.assertTrue(self.open_(write(os.path.join(self.d, "bin.dat"), b"\x00\x01\x02binary"))["binary"])
+        big = self.open_(write(os.path.join(self.d, "big.log"), b"x" * (fm.MAX_EDIT + 1)))
+        self.assertEqual((big["tooLarge"], big["data"], big["writable"]), (True, "", False))
+
+    def test_changed_on_disk_refused(self):
+        p = write(os.path.join(self.d, "c.txt"), b"one")
+        o = self.open_(p)
+        write(p, b"someone else")
+        self.assertEqual(self.save(p, o, "mine")["error"], "This file changed on disk.")
+        o = self.open_(p)
+        pl = self.save(p, o, "mine")
+        time.sleep(0.01)
+        write(p, b"changed again")                                     # between preview and saving
+        j = wait(fm.fm_start({"plan": pl["plan"]})["job"])
+        self.assertIn("changed on disk", j.errors[0]["message"])
+        self.assertEqual(read(p), b"changed again")
+
+    def test_protected_refused(self):
+        p = write(os.path.join(self.d, "p.txt"), b"one")
+        o = self.open_(p)
+        with protect(items=[p]):
+            self.assertFalse(self.open_(p)["writable"])
+            self.assertIn("test item", self.open_(p)["reason"])
+            self.assertIn("test item", self.save(p, o, "two")["error"])
+        self.assertEqual(read(p), b"one")
+
+    def test_undo_restores_the_previous_version(self):
+        p, j = self.round_trip(b"first version\n", "utf-8", False)
+        self.assertEqual(sorted(os.listdir(self.d)), [os.path.basename(p)])     # previous version went to the bin
+        self.assertTrue(any(f.endswith(".bin") for f in os.listdir(fm.BACKUPS)))
+        u = wait(fm.fm_undo({"journal": j.journal})["job"])
+        self.assertEqual(u.errors, [])
+        self.assertEqual(read(p), b"first version\n")
+        self.assertEqual(sorted(os.listdir(self.d)), [os.path.basename(p)])
+
+    def test_undo_refused_after_a_later_change(self):
+        p, j = self.round_trip(b"v1", "utf-8", False)
+        write(p, b"v3 by someone else")
+        u = wait(fm.fm_undo({"journal": j.journal})["job"])
+        self.assertEqual(u.errors[0]["message"], fm.UNDO_CHANGED)
+        self.assertEqual(read(p), b"v3 by someone else")
+
+
+class zero_ids_at:
+    """Make os.lstat/os.stat report file id 0 for exact paths (a share or disk without ids), whatever is there."""
+    BASE = zero_ids.BASE
+
+    def __init__(self, *paths):
+        self.keys = {os.path.normcase(os.path.abspath(p)) for p in paths}
+
+    def _zero(self, arg, st):
+        if not isinstance(arg, (str, bytes)) or os.path.normcase(os.path.abspath(os.fsdecode(arg))) not in self.keys:
+            return st
+        extra = {n: getattr(st, n) for n in dir(st) if n.startswith("st_") and n not in self.BASE}
+        seq = list(st)
+        seq[1] = 0
+        return os.stat_result(seq, extra)
+
+    def __enter__(self):
+        self.orig = os.lstat, os.stat
+        lstat, stat_ = self.orig
+        os.lstat = lambda p, *a, **kw: self._zero(p, lstat(p, *a, **kw))
+        os.stat = lambda p, *a, **kw: self._zero(p, stat_(p, *a, **kw))
+        return self
+
+    def __exit__(self, *exc):
+        os.lstat, os.stat = self.orig
+
+
+class Round3Sync(CompareFixture):
+    """Sync plans only what was reviewed, item by item."""
+
+    def setUp(self):
+        super().setUp()
+        t = time.time() - 9000
+        write(os.path.join(self.L, "album", "p1.jpg"), b"1", t)
+        write(os.path.join(self.L, "album", "deep", "p2.jpg"), b"2", t)
+        write(os.path.join(self.L, "album", ".hidden.jpg"), b"h", t)
+
+    def test_folder_copy_is_explicit_per_item(self):
+        rid, rows = self.compare(recursive=True)
+        p = fm.fm_sync_plan({"comparison": rid, "scope": "differences"})
+        album = [i for i in p["items"] if "album" in i["src"]]
+        self.assertEqual(sorted((os.path.relpath(i["src"], self.L), i["kind"]) for i in album),
+                         [("album", "d"), (os.path.join("album", "deep"), "d"),
+                          (os.path.join("album", "deep", "p2.jpg"), "f"), (os.path.join("album", "p1.jpg"), "f")])
+        write(os.path.join(self.L, "album", "added-later.jpg"), b"new")          # after the review
+        j = wait(fm.fm_start({"plan": p["plan"]})["job"])
+        self.assertEqual(j.errors, [])
+        got = sorted(os.listdir(os.path.join(self.R, "album")))
+        self.assertEqual(got, ["deep", "p1.jpg"])                             # no hidden, nothing unreviewed
+
+    def test_unreviewed_folder_contents_are_blocked(self):
+        rid, rows = self.compare(recursive=False)
+        p = fm.fm_sync_plan({"comparison": rid, "scope": "differences"})
+        self.assertTrue(any(fm.NOT_REVIEWED == b["reason"] for b in p["blocked"]))
+        self.assertFalse([i for i in p["items"] if "album" in i["src"]])
+
+    def test_stored_choices_and_descendant_skip(self):
+        rid, rows = self.compare(recursive=True)
+        skip = rows[os.path.join("album", "p1.jpg")]["id"]
+        r = results(rid, setActions=[{"id": skip, "action": "skip"}], filter="differences")
+        self.assertEqual(next(x for x in r["rows"] if x["id"] == skip)["action"], "skip")
+        p = fm.fm_sync_plan({"comparison": rid, "scope": "differences"})       # no actions sent: stored ones
+        self.assertNotIn(os.path.join(self.L, "album", "p1.jpg"), [i["src"] for i in p["items"]])
+        results(rid, setActions=[{"id": skip, "action": "default"}])
+        p = fm.fm_sync_plan({"comparison": rid, "scope": "differences"})
+        self.assertIn(os.path.join(self.L, "album", "p1.jpg"), [i["src"] for i in p["items"]])
+        self.assertIn("differences", fm.RESULTS[rid]["_views"])                # the filtered index is reused
+
+    def test_folder_trash_needs_the_reviewed_tree(self):
+        rid, rows = self.compare(recursive=True, hidden=True)
+        p = fm.fm_sync_plan({"comparison": rid, "scope": "differences", "deleteFrom": "left"})
+        trash = [i for i in p["items"] if i["action"] == "trash"]
+        self.assertEqual([os.path.basename(i["src"]) for i in trash], ["album", "only-left.txt"])   # one folder item
+        write(os.path.join(self.L, "album", "deep", "new work.txt"), b"keep me")
+        j = wait(fm.fm_start({"plan": p["plan"]})["job"])
+        self.assertTrue(any(e["message"] == fm.SYNC_TREE_CHANGED for e in j.errors), j.errors)
+        self.assertEqual(read(os.path.join(self.L, "album", "deep", "new work.txt")), b"keep me")
+        rid, rows = self.compare(recursive=True, hidden=True)
+        results(rid, setActions=[{"id": rows[os.path.join("album", "p1.jpg")]["id"], "action": "skip"}])
+        p = fm.fm_sync_plan({"comparison": rid, "scope": "differences", "deleteFrom": "left"})
+        self.assertTrue(any("set differently" in b["reason"] for b in p["blocked"]))
+
+    def test_folder_trash_of_an_unchanged_tree(self):
+        rid, rows = self.compare(recursive=True, hidden=True)
+        p = fm.fm_sync_plan({"comparison": rid, "scope": "differences", "deleteFrom": "left",
+                             "actions": [{"id": r["id"], "action": "skip"} for r in rows.values()
+                                         if not r["rel"].startswith("album")]})
+        j = wait(fm.fm_start({"plan": p["plan"]})["job"])
+        self.assertEqual(j.errors, [])
+        self.assertFalse(os.path.exists(os.path.join(self.L, "album")))
+        wait(fm.fm_undo({"journal": j.journal})["job"])
+        self.assertEqual(read(os.path.join(self.L, "album", ".hidden.jpg")), b"h")
+
+
+class Round3Editor(Base):
+    """The recoverable replacement transaction, failing on purpose at every step."""
+
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.realpath(self.d)
+        self.p = write(os.path.join(self.d, "doc.txt"), b"original")
+        fm._FAULTS.clear()
+
+    def tearDown(self):
+        fm._FAULTS.clear()
+        fm.SWAP_MODE = None
+
+    def save(self, text=b"edited"):
+        import base64
+        o = fm.fm_edit_open({"path": self.p})
+        pl = fm.fm_plan({"op": "edit_save", "sources": [self.p], "version": o["version"],
+                         "data": base64.b64encode(text).decode(), "encoding": "utf-8", "bom": False})
+        self.assertNotIn("error", pl)
+        return wait(fm.fm_start({"plan": pl["plan"]})["job"])
+
+    def pending(self):
+        return [r for r in fm._pending_read() if r.get("kind") == "swap" and r.get("dir") == self.d]
+
+    def assert_untouched(self, j):
+        self.assertEqual(j.state, "failed")
+        self.assertEqual(read(self.p), b"original")
+        self.assertEqual(os.listdir(self.d), ["doc.txt"])                       # no temp, no stray previous
+        self.assertEqual(self.pending(), [])
+
+    def test_each_step_fails_cleanly(self):
+        for mode in ("renames", None):
+            fm.SWAP_MODE = mode
+            for step in ("backup", "temp", "commit") + (("second",) if mode == "renames" else ()):
+                fm._FAULTS.clear()
+                fm._FAULTS.add(step)
+                j = self.save()
+                self.assert_untouched(j)
+                self.assertIn("Injected", j.errors[0]["message"], (mode, step))
+
+    def test_rollback_failure_keeps_the_record_and_says_where(self):
+        fm.SWAP_MODE = "renames"
+        fm._FAULTS.update({"second", "rollback"})
+        j = self.save()
+        self.assertEqual(j.state, "failed")
+        rec = self.pending()
+        self.assertEqual(len(rec), 1)
+        self.assertIn(rec[0]["prev"], j.errors[0]["message"])                   # exact recovery location
+        self.assertIn(self.d, j.errors[0]["message"])
+        self.assertFalse(os.path.exists(self.p))
+        self.assertEqual(read(os.path.join(self.d, rec[0]["prev"])), b"original")
+        fm._FAULTS.clear()
+        fm.recover()                                                           # next start puts it back
+        self.assertEqual(read(self.p), b"original")
+        self.assertEqual(self.pending(), [])
+
+    def test_crash_after_the_first_rename(self):
+        # what a power cut right after "rename the original aside" leaves behind
+        os.rename(self.p, os.path.join(self.d, "doc (previous version).txt"))
+        write(os.path.join(self.d, ".hoard-crashjob-1.part"), b"half")
+        fm._pending_add({"job": "crashjob", "token": "t1", "kind": "swap", "dir": self.d, "name": "doc.txt",
+                         "tmp": ".hoard-crashjob-1.part", "prev": "doc (previous version).txt"})
+        notes = fm.recover()
+        self.assertEqual(read(self.p), b"original")
+        self.assertEqual(os.listdir(self.d), ["doc.txt"])
+        self.assertTrue(any("doc.txt" in n for n in notes))
+
+    def test_trash_failure_keeps_the_previous_version_visible(self):
+        fm._FAULTS.add("trash")
+        j = self.save()
+        self.assertEqual(j.state, "done")
+        self.assertEqual(read(self.p), b"edited")
+        self.assertEqual(read(os.path.join(self.d, "doc (previous version).txt")), b"original")
+        self.assertIn("previous version", j.errors[0]["message"])
+
+    def test_done_only_when_committed_and_new_version_returned(self):
+        import base64
+        j = self.save(b"v2")
+        self.assertEqual(j.state, "done")
+        o = fm.fm_edit_open({"path": self.p})
+        self.assertEqual(j.result["version"], o["version"])                    # save again straight away
+        write(self.p, b"someone else")
+        pl = fm.fm_plan({"op": "edit_save", "sources": [self.p], "version": j.result["version"],
+                         "data": base64.b64encode(b"v3").decode(), "encoding": "utf-8", "bom": False})
+        self.assertEqual(pl["error"], "This file changed on disk.")
+
+    def test_too_large_is_not_read(self):
+        big = write(os.path.join(self.d, "big.bin"), b"x" * (fm.MAX_EDIT + 1))
+        orig = fm.hashlib.sha256
+        fm.hashlib.sha256 = lambda *a: (_ for _ in ()).throw(AssertionError("hashed"))
+        try:
+            o = fm.fm_edit_open({"path": big})
+        finally:
+            fm.hashlib.sha256 = orig
+        self.assertEqual((o["tooLarge"], o["version"]), (True, None))
+
+
+class Round3Replace(ArchiveFixture):
+    """Extract / pack / checksum replacements: the new output first, then a recoverable swap."""
+
+    def zip_with(self, data):
+        import zipfile
+        p = os.path.join(self.d, f"in-{len(data)}.zip")
+        with zipfile.ZipFile(p, "w") as zf:
+            zf.writestr("note.txt", data)
+        return self.open_archive(p).result["result"]
+
+    def test_extract_replace_then_undo(self):
+        out = os.path.join(self.d, "out")
+        write(os.path.join(out, "note.txt"), b"mine")
+        rid = self.zip_with(b"from the archive")
+        j = run("extract", archive=rid, members=["note.txt"], dest=out, conflict="replace")
+        self.assertEqual(j.errors, [])
+        self.assertEqual(read(os.path.join(out, "note.txt")), b"from the archive")
+        self.assertEqual(os.listdir(out), ["note.txt"])                         # the old one is in the Trash
+        wait(fm.fm_undo({"journal": j.journal})["job"])
+        self.assertEqual(read(os.path.join(out, "note.txt")), b"mine")
+
+    def test_cancelled_replacement_leaves_the_original(self):
+        out = os.path.join(self.d, "out")
+        write(os.path.join(out, "note.txt"), b"mine")
+        rid = self.zip_with(os.urandom(3 << 20))
+        orig = fm.Job.add_bytes
+
+        def cancel_midway(job, n):
+            orig(job, n)
+            if job.done_b > 0:
+                job.cancel = True
+        fm.Job.add_bytes = cancel_midway
+        try:
+            j = run("extract", archive=rid, members=["note.txt"], dest=out, conflict="replace")
+        finally:
+            fm.Job.add_bytes = orig
+        self.assertEqual(j.state, "cancelled")
+        self.assertEqual(read(os.path.join(out, "note.txt")), b"mine")
+        self.assertEqual(os.listdir(out), ["note.txt"])
+
+    def test_pack_and_checksum_replacements(self):
+        dest = os.path.join(self.d, "out")
+        write(os.path.join(dest, "proj.zip"), b"old zip")
+        j = run("pack", sources=[self.src], dest=dest, name="proj.zip", conflict="replace")
+        self.assertEqual(j.errors, [])
+        self.assertNotEqual(read(os.path.join(dest, "proj.zip")), b"old zip")
+        wait(fm.fm_undo({"journal": j.journal})["job"])
+        self.assertEqual(read(os.path.join(dest, "proj.zip")), b"old zip")
+        a = write(os.path.join(self.d, "c", "a.txt"), b"a")
+        write(os.path.join(self.d, "c", "checksums.sha256"), b"stale")
+        c = side_job(fm.fm_checksums({"paths": [a]}))
+        p = plan("checksum_save", result=c.result["result"], algorithm="sha256")
+        s = wait(fm.fm_start({"plan": p["plan"], "conflict": "replace"})["job"])
+        self.assertEqual(s.errors, [])
+        self.assertIn(b"  a.txt", read(os.path.join(self.d, "c", "checksums.sha256")))
+
+    def test_implied_folders_and_depth_count_against_limits(self):
+        import zipfile
+        p = os.path.join(self.d, "deep.zip")
+        with zipfile.ZipFile(p, "w") as zf:
+            zf.writestr("a/b/c/d/e/f.txt", b"x")
+        old = fm.MAX_MEMBERS
+        fm.MAX_MEMBERS = 4
+        try:
+            self.refused(p, "limits")
+        finally:
+            fm.MAX_MEMBERS = old
+        p2 = os.path.join(self.d, "deeper.zip")
+        with zipfile.ZipFile(p2, "w") as zf:
+            zf.writestr("/".join(["d"] * (fm.MAX_DEPTH + 1)) + "/x.txt", b"x")
+        self.refused(p2, "limits")
+
+
+class Round3Ids(Base):
+    """No file ids: bound handles on Windows, refusal otherwise; the root exception is only for volume roots."""
+
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.realpath(self.d)
+        self.f = write(os.path.join(self.d, "f.txt"), b"one")
+
+    def test_root_exception_is_only_for_volume_roots(self):
+        self.assertFalse(plat.is_volume_root(self.d))
+        self.assertTrue(plat.is_volume_root(os.path.splitdrive(self.d)[0] + "\\" if WIN else "/"))
+        st = os.lstat(self.d)
+        fake = os.stat_result([st.st_mode, 0] + list(st)[2:],
+                              {n: getattr(st, n) for n in dir(st) if n.startswith("st_") and n not in zero_ids.BASE})
+        self.assertFalse(fm.safefs.same_id(fake, (st.st_dev, 0, True)))           # no fingerprint: refused
+        self.assertTrue(fm.safefs.same_id(fake, (st.st_dev, 0, True), root_ok=True))
+        self.assertFalse(fm.safefs.same_id(fake, (st.st_dev, st.st_ino, True)))   # one id real, one missing
+
+    @unittest.skipUnless(WIN, "handle-bound changes are Windows-only (elsewhere: refused)")
+    def test_delete_and_rename_through_a_bound_handle(self):
+        with zero_ids_at(self.d, self.f, os.path.join(self.d, "g.txt")):
+            j = run("rename", sources=[self.f], name="g.txt")
+            self.assertEqual(j.errors, [])
+            g = os.path.join(self.d, "g.txt")
+            self.assertEqual(read(g), b"one")
+            j = run("delete", sources=[g], confirm=True)
+            self.assertEqual(j.errors, [])
+        self.assertEqual(os.listdir(self.d), [])
+
+    def test_swap_without_ids_is_refused(self):
+        with zero_ids_at(self.d, self.f):
+            p = plan("delete", sources=[self.f])
+            time.sleep(0.02)
+            os.remove(self.f)
+            write(self.f, b"someone else's new file")
+            j = wait(fm.fm_start({"plan": p["plan"], "confirm": True})["job"])
+        self.assertTrue(j.errors)
+        self.assertEqual(read(self.f), b"someone else's new file")
+
+    def test_trash_without_ids_is_refused(self):
+        with zero_ids_at(self.d, self.f):
+            j = run("trash", sources=[self.f])
+        self.assertEqual(j.errors[0]["message"], fm.safefs.NO_ID_TRASH)
+        self.assertTrue(os.path.exists(self.f))
+
+    @unittest.skipUnless(_exfat_d(), "needs D:\\ formatted FAT/exFAT")
+    def test_real_exfat_swaps_between_plan_and_run(self):
+        import uuid
+        folder = f"D:\\hoard-test-{uuid.uuid4().hex[:8]}"
+        moved = folder + "-moved"
+        os.makedirs(folder)
+        try:
+            f = write(os.path.join(folder, "f.txt"), b"planned")
+            p = plan("delete", sources=[f])
+            os.remove(f)
+            write(f, b"swapped in")                               # same name, a different file
+            j = wait(fm.fm_start({"plan": p["plan"], "confirm": True})["job"])
+            self.assertTrue(j.errors)
+            self.assertEqual(read(f), b"swapped in")
+            src = write(os.path.join(self.d, "in.txt"), b"x")
+            p = plan("copy", sources=[src], dest=folder)
+            os.rename(folder, moved)
+            os.makedirs(folder)                                    # the destination folder swapped too
+            j = wait(fm.fm_start({"plan": p["plan"]})["job"])
+            self.assertIn("changed", j.errors[0]["message"])
+            self.assertEqual(os.listdir(folder), [])
+            f = os.path.join(moved, "f.txt")                     # (it moved with its folder)
+            o = fm.fm_edit_open({"path": f})                       # editor save on exFAT (ReplaceFileW)
+            import base64
+            pl = fm.fm_plan({"op": "edit_save", "sources": [f], "version": o["version"],
+                             "data": base64.b64encode(b"edited on exFAT").decode(), "encoding": "utf-8", "bom": False})
+            j = wait(fm.fm_start({"plan": pl["plan"]})["job"])
+            self.assertEqual((j.state, read(f)), ("done", b"edited on exFAT"))
+            wait(fm.fm_undo({"journal": j.journal})["job"])
+            self.assertEqual(read(f), b"swapped in")
+        finally:
+            for d in (folder, moved):
+                if os.path.isdir(d):
+                    for n in os.listdir(d):
+                        if os.path.isfile(os.path.join(d, n)):
+                            os.remove(os.path.join(d, n))
+                    os.rmdir(d)
 
 
 class Server(unittest.TestCase):

@@ -57,6 +57,10 @@ A Midnight Commander-style file manager inside Hoard, with the best of Total Com
   - **Ctrl+U** swap, **Alt+O/I** sync the other pane, **Ctrl+\\** saved locations, **Alt+Left/Right** history, **Ctrl+Q** quick view;
   - **Alt+F7** find (name and contents), **Ctrl+M** multi-rename with a live preview, **Ctrl+Shift+P** command palette, **F1** all keys.
 - **Jobs:** copies and moves run as jobs, with progress, speed, pause, resume and cancel, and ask what to do on a name clash (Replace keeps the old one in the bin). **Ctrl+Z** undoes renames, moves, trash, new items and unchanged copies; it never overwrites newer work. An interrupted job is recovered the next time Hoard starts.
+- **Compare and sync** (Ctrl+X then D): both panes line up file by file (only left/right, newer, different, same; quick by size and date or thorough by content), then **Review sync…** shows a direction per file, a dry run, and applies it as an undoable job. Nothing is deleted unless you tick it, and then only to the Recycle Bin/Trash.
+- **Archives:** Enter opens a .zip/.tar/.tar.gz/.tgz/.tar.bz2/.tar.xz like a read-only folder; F3 views members, F5 extracts, **Alt+F9** extracts all, **Alt+F5** packs the tagged items into a .zip. Archives with unsafe paths, links or bomb-like compression are refused.
+- **Checksums** (menu or palette): MD5, SHA-1, SHA-256; copy, save `checksums.sha256`, or verify against a checksum file or a pasted value.
+- **Editor (F4):** text files up to 5 MB with line numbers, search/replace (regex), go to line, and wrap; it keeps the file's encoding (UTF-8 with or without BOM, UTF-16, Latin-1) and every line's own line ending. Saving keeps the file's permissions and attributes, puts the previous version in the Recycle Bin/Trash, and can be undone.
 - **System-critical files can never be deleted, moved, renamed or overwritten:** not from Files, the map, the removal list or cleanup. Protection is checked by file identity, so another name for the same folder (a junction, `subst` drive, mapped drive, `\\localhost\C$`, a bind mount) doesn't get around it. Protected rows show a lock and the reason. Links are never followed.
 
 ### Keyboard

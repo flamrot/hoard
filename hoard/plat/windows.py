@@ -246,6 +246,89 @@ def final_path(path, follow=False):
         _k32.CloseHandle(h)
 
 
+_k32.ReplaceFileW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                              ctypes.c_void_p, ctypes.c_void_p]
+_k32.ReplaceFileW.restype = wintypes.BOOL
+_k32.GetVolumePathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+_k32.GetVolumePathNameW.restype = wintypes.BOOL
+_k32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+_k32.SetFileInformationByHandle.restype = wintypes.BOOL
+
+
+def replace_file(replaced, replacement, backup):
+    """ReplaceFileW: `replacement` takes the place of `replaced`, which survives as `backup`. Keeps the original's
+    ACLs, attributes, creation time, alternate streams and encryption/compression. Returns (ok, Windows error)."""
+    ok = _k32.ReplaceFileW(replaced, replacement, backup, 0x2, None, None)     # REPLACEFILE_IGNORE_MERGE_ERRORS
+    return (True, 0) if ok else (False, ctypes.get_last_error())
+
+
+def fs_name(path):
+    """The file system of the volume holding path ('NTFS', 'exFAT', 'FAT32', …), or ''."""
+    root = volume_root(path)
+    buf = ctypes.create_unicode_buffer(64)
+    if not root or not ctypes.windll.kernel32.GetVolumeInformationW(root, None, 0, None, None, None, buf, 64):
+        return ""
+    return buf.value
+
+
+def volume_root(path):
+    """The root of the volume that holds path (GetVolumePathNameW), or None."""
+    buf = ctypes.create_unicode_buffer(1024)
+    return buf.value if _k32.GetVolumePathNameW(path, buf, 1024) else None
+
+
+def _ft_ns(ft):
+    return (ft - 116444736000000000) * 100
+
+
+def bind_item(path, size, mtime_ns, birth_ns, is_dir):
+    """For disks without file ids: open the item itself (never following a link) with delete access and without
+    delete sharing, so nobody else can rename, replace or remove it, and check it's the one recorded (size,
+    modified and created times). Returns a handle, or None if it isn't that item."""
+    h = _k32.CreateFileW(path, 0x00010000 | 0x80, 0x1 | 0x2, None, 3, 0x02000000 | 0x00200000, None)
+    if h is None or h == _INVALID:
+        return None
+    basic = (ctypes.c_longlong * 5)()                 # FILE_BASIC_INFO: created, accessed, written, changed, attrs
+    std = (ctypes.c_byte * 24)()                      # FILE_STANDARD_INFO
+    ok = _k32.GetFileInformationByHandleEx(h, 0, basic, ctypes.sizeof(basic)) and \
+        _k32.GetFileInformationByHandleEx(h, 1, std, ctypes.sizeof(std))
+    eof = int.from_bytes(bytes(std)[8:16], "little", signed=True)
+    folder = bool(bytes(std)[21])
+    if not ok or birth_ns is None or _ft_ns(basic[0]) != birth_ns or _ft_ns(basic[2]) != mtime_ns or \
+            folder != bool(is_dir) or (not is_dir and eof != size):
+        _k32.CloseHandle(h)
+        return None
+    return h
+
+
+def bound_delete(h):
+    """Delete the item behind a bound handle (it goes when the handle closes)."""
+    flags = wintypes.DWORD(0x1 | 0x10)               # FILE_DISPOSITION_FLAG_DELETE | IGNORE_READONLY_ATTRIBUTE
+    if _k32.SetFileInformationByHandle(h, 21, ctypes.byref(flags), 4):
+        return
+    one = ctypes.c_ubyte(1)                            # FILE_DISPOSITION_INFO (older Windows / file systems)
+    if not _k32.SetFileInformationByHandle(h, 4, ctypes.byref(one), 1):
+        e = ctypes.get_last_error()
+        raise OSError(None, ctypes.FormatError(e), None, e)
+
+
+def bound_rename(h, target):
+    """Rename the item behind a bound handle to the full path `target`, never replacing anything."""
+    name = target.encode("utf-16-le")
+    buf = ctypes.create_string_buffer(24 + len(name) + 2)   # FILE_RENAME_INFO: flags, root, length, name
+    ctypes.memmove(ctypes.addressof(buf) + 16, ctypes.byref(wintypes.DWORD(len(name))), 4)
+    ctypes.memmove(ctypes.addressof(buf) + 20, name, len(name))
+    if not _k32.SetFileInformationByHandle(h, 3, buf, len(buf)):
+        e = ctypes.get_last_error()
+        if e in (80, 183):
+            raise FileExistsError(17, "Something with that name is already there.", target)
+        raise OSError(None, ctypes.FormatError(e), target, e)
+
+
+def close_handle(h):
+    _k32.CloseHandle(h)
+
+
 def dir_info(path):
     """{name: (file id, allocated bytes)} for a whole folder in a few calls. os.scandir leaves file ids out on
     Windows, and asking per file (DirEntry.inode) costs a file open each. None if the folder can't be read."""

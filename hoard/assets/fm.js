@@ -75,10 +75,10 @@ const FM = {
   panes: [], active: 0, roots: [], home: "", sep: S.sep || "\\", ci: (S.sep || "\\") === "\\", trashName: S.trashName,
   hotlist: [], density: "compact", hidden: false, split: .5, cols: {},
   jobs: [], hist: [], pending: new Map(), seen: new Map(), built: false, ready: false, rh: 28,
-  escAt: 0, chordAt: 0, jump: "", jumpPane: null, jumpT: 0, quick: null, drag: null, lastAnnounce: 0, renameEl: null,
+  watch: new Map(), cmp: null, escAt: 0, chordAt: 0, jump: "", jumpPane: null, jumpT: 0, quick: null, drag: null, lastAnnounce: 0, renameEl: null,
 };
 const ACTIVE = new Set(["queued", "running", "paused", "waiting"]);
-const MUT = op => op !== "sizes" && op !== "find";
+const MUT = op => !["sizes", "find", "compare", "archive_open", "archive", "checksums", "checksum"].includes(op);   // read jobs run beside the queue
 const OVERSCAN = 10;
 const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -92,7 +92,7 @@ function newTab(path, o = {}) {
     loading: false, loaded: false, tok: 0, back: [], fwd: [], ntag: 0, tagBytes: 0, tagUnknown: 0, maxS: 0, stale: false,
   };
 }
-const tabOf = P => P.tabs[P.ti];
+const tabOf = P => FM.cmp ? FM.cmp.tabs[P.side] : P.tabs[P.ti];
 const AP = () => FM.panes[FM.active];
 const OP = () => FM.panes[1 - FM.active];
 const AT = () => tabOf(AP());
@@ -157,11 +157,12 @@ function applyFilter(t, quiet) {
   recount(t);
 }
 function recount(t) {
+  if (t.kind === "cmp" && FM.cmp) { t.ntag = FM.cmp.selected || 0; t.tagBytes = 0; t.tagUnknown = 0; return; }
   let n = 0, b = 0, u = 0;
   for (const r of t.rows) if (r._t) { n++; if (r.s == null) u++; else b += r.s; }
   t.ntag = n; t.tagBytes = b; t.tagUnknown = u;
 }
-function setTag(t, r, on) { r._t = !!on; }
+function setTag(t, r, on) { if (r._c && FM.cmp) return cmpTag(r, on); r._t = !!on && !r._missing; }
 function placeCursor(t, name, fallback = 0) {
   let i = name != null ? t.view.findIndex(r => r.n === name) : -1;
   if (i < 0 && name != null && FM.ci) { const l = name.toLowerCase(); i = t.view.findIndex(r => r.n.toLowerCase() === l); }
@@ -178,7 +179,7 @@ function sel(t, rows) {
   if (rows) return rows;
   if (t.ntag) return t.rows.filter(r => r._t);
   const c = t.view[t.cur];
-  return c ? [c] : [];
+  return c && !c._missing ? [c] : [];
 }
 
 /* ------------------------------------------------------------------ DOM */
@@ -267,6 +268,7 @@ function renderPane(P) {
   renderTabs(P); renderNav(P); renderHead(P); renderFilter(P); renderBody(P); renderStatus(P);
 }
 function tabLabel(t) {
+  if (t.kind === "archive") return t.arch?.name || baseName(t.archive || "");
   if (t.kind === "find") return "Find: " + (t.label || "results");
   const b = baseName(t.path) || t.path || "…";
   return t.branch ? "Branch: " + b : b;
@@ -279,7 +281,9 @@ function renderTabs(P) {
 }
 function renderNav(P) {
   const t = tabOf(P), cr = P.el.crumbs;
-  P.el.up.disabled = t.kind === "find" || (!t.parent && !t.branch);
+  cr.removeAttribute("aria-label");
+  if (t.kind === "archive" && t.arch) return renderArchNav(P, t);
+  P.el.up.disabled = t.kind === "find" || (t.kind === "dir" && !t.parent && !t.branch);
   const crumbs = t.crumbs.length ? t.crumbs : t.path ? [{ n: t.path, path: t.path }] : [];
   const btn = (c, last) => `<button data-p="${esc(c.path)}" class="${last ? "last" : ""}" title="${esc(c.path)}">${esc(c.n)}</button>`;
   let parts;
@@ -296,7 +300,7 @@ function renderNav(P) {
   P.el.star.setAttribute("aria-pressed", String(saved));
   P.el.star.title = saved ? "Remove from saved locations" : "Save this location (Ctrl+\\ shows saved locations)";
   P.el.star.setAttribute("aria-label", P.el.star.title);
-  P.el.star.disabled = t.kind === "find";
+  P.el.star.disabled = t.kind !== "dir";
 }
 const COLS = [
   { k: "tag", cls: "c-tag" }, { k: "name", cls: "c-name", label: "Name", sort: "name" }, { k: "size", cls: "c-size", label: "Size", sort: "size", rz: "size" },
@@ -304,6 +308,8 @@ const COLS = [
 ];
 function renderHead(P) {
   const t = tabOf(P), allTagged = t.view.length > 0 && t.ntag >= t.view.length;
+  P.el.grid.classList.toggle("fm-cmpgrid", t.kind === "cmp");
+  if (t.kind === "cmp") { P.el.grid.classList.remove("brief"); P.el.grid.setAttribute("aria-colcount", "4"); P.el.head.innerHTML = cmpHeadHTML(); return; }
   P.el.grid.classList.toggle("brief", t.listing === "brief");
   P.el.grid.setAttribute("aria-colcount", t.listing === "brief" ? "3" : "5");
   P.el.head.innerHTML = COLS.map(c => {
@@ -325,14 +331,16 @@ function renderFilter(P) {
 function renderBody(P) {
   const t = tabOf(P), g = P.el.grid;
   g.setAttribute("aria-rowcount", String(t.view.length + 1));
-  g.setAttribute("aria-label", `${P.side ? "Right" : "Left"} pane: ${t.kind === "find" ? `find results in ${t.path}` : t.path}`);
+  g.setAttribute("aria-label", `${P.side ? "Right" : "Left"} pane: ${t.kind === "find" ? `find results in ${t.path}` : t.kind === "cmp" ? `comparison of ${t.path}` : t.kind === "archive" ? `archive ${t.label || t.archive}, read-only` : t.path}`);
   renderMsg(P);
   renderRows(P, true);
 }
 function renderMsg(P) {
   const t = tabOf(P), m = P.el.msg;
   let html = "", err = false;
-  if (t.loading && t.showLoading) html = `<div class="loading">${SPIN}Reading folder…</div>`;
+  const special = t.kind === "cmp" && FM.cmp ? cmpMsg(P) : t.kind === "archive" && t.arch ? archiveMsg(P, t) : null;
+  if (special) { html = special.html; err = !!special.err; }
+  else if (t.loading && t.showLoading) html = `<div class="loading">${SPIN}Reading folder…</div>`;
   else if (t.error && !t.rows.length) {
     err = true;
     html = `<div><b>${esc(t.error)}</b><div class="row-actions"><button class="btn" data-m="retry">Retry</button>${t.parent || dirName(t.path) ? `<button class="btn" data-m="up">Go up</button>` : ""}</div></div>`;
@@ -345,6 +353,7 @@ function renderMsg(P) {
   if (m._html !== html) { m.innerHTML = html; m._html = html; }
 }
 function rowHTML(t, r) {
+  if (t.kind === "cmp") return cmpRowHTML(t, r);
   const dir = r.k === "d";
   const icon = dir ? (r.h ? I.hdir : I.dir) : r.k === "l" ? I.link : r.h ? I.hfile : I.file;
   let nm = r.n, rel = "";
@@ -362,6 +371,7 @@ function rowHTML(t, r) {
     + `<div role="gridcell" class="c-type" title="${esc(typeName(r))}">${esc(typeName(r))}</div>`;
 }
 function rowLabel(r) {
+  if (r._c || r._stub) return cmpRowLabel(r);
   return `${r.n}, ${typeName(r)}, ${r._calc ? "size being calculated" : r.s == null ? "size unknown" : sizeWords(r.s)}${r.h ? ", hidden" : ""}${r.ro ? ", read-only" : ""}${r.p ? ", " + r.p : ""}`;
 }
 function renderRows(P, force) {
@@ -373,6 +383,7 @@ function renderRows(P, force) {
   const want = new Set();
   for (let i = first; i < last; i++) want.add(i);
   if (n && t.cur >= 0 && t.cur < n) want.add(t.cur);            // the cursor row always exists, for aria-activedescendant
+  if (t.kind === "cmp" && n) cmpNeed(Math.min(first, t.cur), Math.max(last, t.cur + 1));
   for (const [i, el] of P.pool) if (!want.has(i)) { P.pool.delete(i); el.remove(); P.free.push(el); }
   const on = P === AP(), idp = `fm${P.side}r`;
   for (const i of want) {
@@ -381,19 +392,19 @@ function renderRows(P, force) {
     if (!el) {
       el = P.free.pop() || ce("div", "fm-row");
       el.setAttribute("role", "row");
-      el.draggable = true;
       P.pool.set(i, el);
       sc.appendChild(el);
       el._sig = null;
     }
-    const content = `${t.id}|${t.kind}|${t.branch}|${r.s}|${r._calc ? 1 : 0}|${t.maxS}|${r.m}`;
+    const content = `${t.id}|${t.kind}|${t.branch}|${r.s}|${r._calc ? 1 : 0}|${t.maxS}|${r.m}|${r._stub ? 1 : 0}`;
     const state = `${i}|${r._t ? 1 : 0}|${i === t.cur ? 1 : 0}|${rh}|${on ? 1 : 0}|${r._drop ? 1 : 0}`;
     if (force || el._row !== r || el._content !== content) { el.innerHTML = rowHTML(t, r); el._content = content; el._state = null; }
     if (el._state === state && el._row === r) continue;
     el._state = state; el._row = r;
     el.id = idp + i;
     el.dataset.i = i;
-    el.className = "fm-row" + (isDir(r) ? " dir" : "") + (r._t ? " tag" : "") + (i === t.cur ? " cur" : "") + (r._drop ? " drop" : "");
+    el.draggable = (t.kind === "dir" || t.kind === "find") && !r._missing;
+    el.className = "fm-row" + (isDir(r) ? " dir" : "") + (r._missing ? " miss" : "") + (r._t ? " tag" : "") + (i === t.cur ? " cur" : "") + (r._drop ? " drop" : "");
     el.style.transform = `translateY(${i * rh}px)`;
     el.setAttribute("aria-rowindex", String(i + 2));
     el.setAttribute("aria-selected", String(!!r._t));
@@ -411,19 +422,23 @@ function renderStatus(P) {
   const t = tabOf(P);
   const calc = t.rows.some(r => r._calc);
   let s;
-  if (t.ntag) {
+  if (t.kind === "cmp" && FM.cmp) s = `<b>${(FM.cmp.selected || 0).toLocaleString()} selected</b> <span class="muted">· ${items(t.view.length)} shown${FM.cmp.counts ? ` of ${FM.cmp.counts.all.toLocaleString()}` : ""}</span>`;
+  else if (t.ntag) {
     s = `<b>${t.ntag.toLocaleString()} selected</b> · ${fmt(t.tagBytes)}`;
     if (t.tagUnknown) s += ` <span class="muted">+ ${plural(t.tagUnknown, "folder")} not sized</span>`
       + (calc ? "" : ` <button class="link" data-s="calc" title="Calculate the unknown folder sizes">Calculate</button>`);
   } else s = `0 selected · 0 B`;
+  if (t.kind !== "cmp") {
   const cnt = t.filter.text ? `${t.view.length.toLocaleString()} of ${t.rows.length.toLocaleString()} shown` : items(t.rows.length);
-  s += ` <span class="muted">· ${cnt}${t.truncated ? ` · first ${t.rows.length.toLocaleString()} only` : ""}</span>`;
+  s += ` <span class="muted">· ${cnt}${t.truncated ? ` · first ${t.rows.length.toLocaleString()} only` : ""}${t.kind === "archive" ? " · Archive contents are read-only" : ""}</span>`;
   if (calc) s += ` <span class="spinner sm" aria-hidden="true"></span><span class="muted">Calculating sizes…</span> <button class="link" data-s="stopcalc">Stop</button>`;
+  }
   P.el.sel.innerHTML = s;
   const root = rootFor(t.path);
   P.el.free.textContent = root && root.free != null ? `${fmt(root.free)} free` : "";
   P.el.status.title = t.scanned ? `Folder sizes from scan: ${new Date(t.scanned * 1000).toLocaleString()}`
                                 : "Folder sizes aren't in a scan yet. Press Space to calculate.";
+  if (P === AP()) fkeyLabels();
   const j = P.el.jump;
   j.hidden = !(FM.jump && FM.jumpPane === P);
   if (!j.hidden) j.textContent = "Jump: " + FM.jump;
@@ -448,6 +463,7 @@ function moveCursor(P, i, extend) {
   t.cur = i; t.curName = t.view[i].n;
   ensureVisible(P);
   renderRows(P);
+  if (FM.cmp) cmpMirror(P);
   if (extend) { renderStatus(P); renderHead(P); }
   quickSoon();
 }
@@ -455,6 +471,8 @@ function refreshTags(P) { const t = tabOf(P); recount(t); renderRows(P); renderS
 
 /* ------------------------------------------------------------------ loading and navigation */
 async function load(P, t, path, o = {}) {
+  if (t.kind === "archive" && t.arch) return t.arch.opening ? false : archList(P, t, o);
+  if (t.kind === "cmp") return false;
   const my = ++t.tok;
   t.loading = true; t.showLoading = false;
   const slow = setTimeout(() => { if (t.tok === my && t.loading) { t.showLoading = true; if (visible(P, t)) renderMsg(P); } }, 150);
@@ -495,8 +513,10 @@ async function load(P, t, path, o = {}) {
   return true;
 }
 async function go(P, path, o = {}) {
+  if (FM.cmp) exitCompare(true);
   const t = tabOf(P);
   if (!path) return false;
+  if (t.kind === "archive") { if (t.arch?.opening && t.arch.job) api("fm_control", { job: t.arch.job, action: "cancel" }).catch(() => {}); Object.assign(t, { kind: "dir", arch: null, archive: null, error: null }); }
   if (FM.quick && FM.quick.P === P) closeQuick();
   const prev = t.loaded && t.kind === "dir" ? { path: t.path, cur: t.view[t.cur]?.n, branch: t.branch } : null;
   if (o.branch === undefined) t.branch = false; else t.branch = o.branch;
@@ -507,13 +527,16 @@ async function go(P, path, o = {}) {
   return ok;
 }
 function goUp(P = AP()) {
+  if (FM.cmp) return exitCompare();
   const t = tabOf(P);
+  if (t.kind === "archive") return archUp(P, t);
   if (t.kind === "find") return;
   if (t.branch) return go(P, t.path, { branch: false });
   const up = t.parent || (t.error ? dirName(t.path) : null);
   if (up && !sameP(up, t.path)) go(P, up, { focus: baseName(t.path) });
 }
 function histMove(P, dir) {
+  if (FM.cmp) exitCompare(true);
   const t = tabOf(P), from = dir < 0 ? t.back : t.fwd, to = dir < 0 ? t.fwd : t.back;
   if (t.kind !== "dir" || !from.length) return announce(dir < 0 ? "Nothing to go back to." : "Nothing to go forward to.");
   const h = from.pop();
@@ -525,6 +548,7 @@ function addPaneHist(P, path) {
   P.hist = [path, ...P.hist.filter(p => !sameP(p, path))].slice(0, 30);
 }
 async function refresh(P, t = tabOf(P)) {
+  if (t.kind === "cmp") return cmpAgain();
   if (t.kind === "find") { if (visible(P, t)) renderPane(P); return; }   // results are a snapshot; finished jobs prune them
   return load(P, t, t.path, { keep: true });
 }
@@ -546,6 +570,7 @@ function activate(P, focus) {
 }
 function focusGrid(P = AP()) { if (FM.built && !FM.root.hidden) P.el.grid.focus({ preventScroll: true }); }
 function switchTab(P, i) {
+  if (FM.cmp && i !== P.ti && i >= 0 && i < P.tabs.length) exitCompare(true);
   if (i === P.ti || i < 0 || i >= P.tabs.length) return;
   if (P.tabs[P.ti]) P.tabs[P.ti].scrollTop = P.el.scroll.scrollTop;
   P.ti = i;
@@ -559,6 +584,7 @@ function switchTab(P, i) {
   savePrefs();
 }
 function addTab(P, path, o = {}) {
+  if (FM.cmp) exitCompare(true);
   const src = tabOf(P);
   const t = o.tab || newTab(path || src.path, { sort: src.sort, desc: src.desc, biggest: src.biggest, listing: src.listing });
   P.tabs.splice(P.ti + 1, 0, t);
@@ -567,6 +593,7 @@ function addTab(P, path, o = {}) {
   return t;
 }
 function closeTab(P, i = P.ti) {
+  if (FM.cmp) exitCompare(true);
   if (P.tabs.length <= 1) return announce("The last tab stays open.");
   P.tabs.splice(i, 1);
   const ni = i < P.ti ? P.ti - 1 : Math.min(P.ti, P.tabs.length - 1);
@@ -607,7 +634,9 @@ function wirePane(P) {
       const r = b.getBoundingClientRect();
       return fmMenu(r.left, r.bottom + 4, e.crumbs._middle.map(c => ({ label: c.n, run: () => go(P, c.path).then(() => focusGrid(P)) })));
     }
+    if (b?.dataset.a !== undefined && tabOf(P).kind === "archive") { const t = tabOf(P), i = +b.dataset.a; if (i < 0) { t.arch.stack = []; archList(P, t, {}); } else archCrumb(P, t, i); return focusGrid(P); }
     if (b?.dataset.p) return go(P, b.dataset.p).then(() => focusGrid(P));
+    if (tabOf(P).kind !== "dir" && tabOf(P).kind !== "find") return;
     editPath(P);
   });
   e.pathin.addEventListener("keydown", ev => {
@@ -648,7 +677,12 @@ function wirePane(P) {
   e.msg.addEventListener("click", ev => {
     const b = ev.target.closest("[data-m]"), t = tabOf(P);
     if (!b) return;
-    if (b.dataset.m === "retry") load(P, t, t.path, { keep: true });
+    if (b.dataset.m === "cmpstop") { if (FM.cmp?.job) control(FM.cmp.job, "cancel"); }
+    else if (b.dataset.m === "cmpagain") cmpAgain();
+    else if (b.dataset.m === "cmpclose") exitCompare();
+    else if (b.dataset.m === "archstop") { if (t.arch?.job) control(t.arch.job, "cancel"); }
+    else if (b.dataset.m === "retry" && t.kind === "archive") { const a = t.arch, path = t.archive; Object.assign(t, { kind: "dir", path: a.ret.path, arch: null }); openArchive(P, { n: a.name, k: "f", path }); }
+    else if (b.dataset.m === "retry") load(P, t, t.path, { keep: true });
     else if (b.dataset.m === "up") goUp(P);
     else if (b.dataset.m === "clear") clearFilter(P);
     focusGrid(P);
@@ -668,7 +702,14 @@ function wirePane(P) {
   });
   e.head.addEventListener("pointerdown", ev => { const h = ev.target.closest(".fm-rz"); if (h) colResize(ev, h.dataset.rz); });
   // rows
-  e.scroll.addEventListener("scroll", () => { if (!P.raf) P.raf = requestAnimationFrame(() => { P.raf = 0; renderRows(P); }); }, { passive: true });
+  e.scroll.addEventListener("scroll", () => {
+    if (!P.raf) P.raf = requestAnimationFrame(() => { P.raf = 0; renderRows(P); });
+    if (FM.cmp) {                                     // paired rows scroll together
+      if (FM.cmpSync) { FM.cmpSync = false; return; }
+      const O = FM.panes[1 - P.side];
+      if (O.el.scroll.scrollTop !== e.scroll.scrollTop) { FM.cmpSync = true; O.el.scroll.scrollTop = e.scroll.scrollTop; }
+    }
+  }, { passive: true });
   new ResizeObserver(() => renderRows(P)).observe(e.scroll);
   e.scroll.addEventListener("click", ev => {
     const el = ev.target.closest(".fm-row");
@@ -738,6 +779,7 @@ function clearFilter(P) {
   filterNow(P);
 }
 function setSort(P, key, biggest) {
+  if (FM.cmp) return;
   const t = tabOf(P);
   if (biggest !== undefined) t.biggest = biggest;
   else if (t.biggest) { t.biggest = false; t.sort = key; t.desc = key === "size" || key === "mtime"; }
@@ -750,12 +792,14 @@ function setSort(P, key, biggest) {
   announce(t.biggest ? "Biggest first" : `Sorted by ${names[t.sort]}, ${t.desc ? "descending" : "ascending"}`);
 }
 function tagAll(P) {
+  if (FM.cmp) { if (FM.cmp.selected) cmpTagAction("clear").then(() => announce("All tags cleared.")); else selectDifferences(); return; }
   const t = tabOf(P), all = t.view.length && t.view.every(r => r._t);
   for (const r of t.view) setTag(t, r, !all);
   refreshTags(P);
   announce(all ? "All tags cleared." : `${items(t.view.length)} tagged, ${fmt(t.tagBytes)}${t.tagUnknown ? ` plus ${plural(t.tagUnknown, "folder")} not sized` : ""}.`);
 }
 function invertTags(P) {
+  if (FM.cmp) return toast("In a comparison, use Select differences.");
   const t = tabOf(P);
   for (const r of t.view) setTag(t, r, !r._t);
   refreshTags(P);
@@ -870,6 +914,15 @@ function toggleDensity() {
 }
 function contextMenu(P, rows, x, y) {
   const t = tabOf(P), one = rows.length === 1 ? rows[0] : null;
+  if (t.kind === "archive") return fmMenu(x, y, [
+    one && !isDir(one) ? { label: "View", keys: "F3", icon: ICON.eye, run: () => openViewer(false) } : null,
+    one && isDir(one) ? { label: "Open", keys: "Enter", icon: ICON.open, run: () => enter(P, one) } : null,
+    { label: "Extract…", keys: "F5", icon: ICON.copy, run: () => extractDlg(false) },
+    { label: "Extract the whole archive…", keys: "Alt+F9", run: () => extractDlg(true) },
+    { label: one ? "Copy name" : "Copy names", keys: "Ctrl+X C", run: () => copyNames(rows) },
+    "-", { label: "Archive contents are read-only.", disabled: true },
+  ]);
+  if (!rows.length) return;
   const prot = rows.filter(r => r.p), lockWhy = prot.length && prot.length === rows.length ? prot[0].p : false;
   fmMenu(x, y, [
     one && isDir(one) ? { label: "Open", keys: "Enter", icon: ICON.open, run: () => enter(P, one) } : null,
@@ -877,18 +930,22 @@ function contextMenu(P, rows, x, y) {
     one && !isDir(one) ? { label: "Open with default app", keys: "Enter", icon: ICON.launch, run: () => openDefault(rowPath(t, one)) } : null,
     one ? { label: isDir(one) ? `Open in ${S.revealName}` : `Show in ${S.revealName}`, icon: ICON.open, run: () => reveal(rowPath(t, one)) } : null,
     "-",
-    { label: "Copy to the other pane…", keys: "F5", icon: ICON.copy, run: () => copyMove("copy", { rows, P }) },
-    { label: "Move to the other pane…", keys: "F6", icon: I.move, disabled: lockWhy, run: () => copyMove("move", { rows, P }) },
-    one ? { label: "Rename", keys: "Shift+F6", icon: I.rename, disabled: one.p || false, run: () => inlineRename(P) }
-        : { label: "Rename these…", keys: "Ctrl+M", icon: I.rename, disabled: lockWhy, run: () => multiRename(rows, P) },
+    { label: "Copy to the other pane…", keys: "F5", icon: ICON.copy, run: () => FM.cmp ? cmpCopy() : copyMove("copy", { rows, P }) },
+    { label: "Move to the other pane…", keys: "F6", icon: I.move, disabled: FM.cmp ? RO_CMP : lockWhy, run: () => copyMove("move", { rows, P }) },
+    one ? { label: "Rename", keys: "Shift+F6", icon: I.rename, disabled: FM.cmp ? RO_CMP : one.p || false, run: () => inlineRename(P) }
+        : { label: "Rename these…", keys: "Ctrl+M", icon: I.rename, disabled: FM.cmp ? RO_CMP : lockWhy, run: () => multiRename(rows, P) },
     "-",
     { label: one ? "Copy full path" : "Copy full paths", keys: "Ctrl+X P", icon: ICON.copy, run: () => copyPaths(rows, P) },
     { label: one ? "Copy name" : "Copy names", keys: "Ctrl+X C", run: () => copyNames(rows) },
     rows.some(isDir) ? { label: "Calculate folder size", keys: "Ctrl+Space", icon: I.size, run: () => calcSizes(P, rows.filter(isDir)) } : null,
-    { label: "Mark for removal", icon: ICON.stage, disabled: lockWhy, run: () => stageRows(P, rows) },
+    { label: "Mark for removal", icon: ICON.stage, disabled: FM.cmp ? RO_CMP : lockWhy, run: () => stageRows(P, rows) },
+    one && !isDir(one) ? { label: "Edit", keys: "F4", disabled: FM.cmp ? RO_CMP : false, run: () => editCmd() } : null,
+    one && !isDir(one) && ARCH_RE.test(one.n) && !FM.cmp ? { label: "Extract the whole archive…", keys: "Alt+F9", run: () => extractDlg(true) } : null,
+    { label: "Checksums…", run: () => checksumsDlg() },
+    !FM.cmp ? { label: "Create ZIP archive…", keys: "Alt+F5", run: () => packDlg() } : null,
     "-",
-    { label: `Move to ${binName()}…`, keys: "F8", icon: ICON.trash, danger: true, disabled: lockWhy, run: () => removeDialog(false, rows, P) },
-    { label: "Delete for good…", keys: "Shift+F8", danger: true, disabled: lockWhy, run: () => removeDialog(true, rows, P) },
+    { label: `Move to ${binName()}…`, keys: "F8", icon: ICON.trash, danger: true, disabled: FM.cmp ? RO_CMP : lockWhy, run: () => removeDialog(false, rows, P) },
+    { label: "Delete for good…", keys: "Shift+F8", danger: true, disabled: FM.cmp ? RO_CMP : lockWhy, run: () => removeDialog(true, rows, P) },
   ]);
 }
 function menuAtCursor(P, entriesFn) {
@@ -962,7 +1019,7 @@ function onKey(e) {
     if (fresh && !["Control", "Meta", "Shift", "Alt"].includes(e.key)) {
       stop(e);
       const c = e.key.toLowerCase();
-      if (c === "p") copyPaths(); else if (c === "c") copyNames();
+      if (c === "p") copyPaths(); else if (c === "c") copyNames(); else if (c === "d") run("compare");
       return;
     }
   }
@@ -1054,7 +1111,7 @@ function endJump() {
 }
 function startChord() {
   FM.chordAt = Date.now();
-  FM.chordEl.textContent = "Ctrl+X, then P copies the full path, or C copies the name. Escape cancels.";
+  FM.chordEl.textContent = "Ctrl+X, then P copies the full path, C copies the name, D compares folders. Escape cancels.";
   FM.chordEl.hidden = false;
   clearTimeout(FM.chordT);
   FM.chordT = setTimeout(() => { FM.chordEl.hidden = true; FM.chordAt = 0; }, 1000);
@@ -1162,8 +1219,8 @@ function defineCommands() {
 function renderFkeys() {
   const F = [[1, "Help", "help"], [2, "Actions", "actions"], [3, "View", "view"], [4, "Edit", "edit"], [5, "Copy", "copy"],
              [6, "Move", "move"], [7, "Folder", "mkdir"], [8, "Trash", "trash"], [9, "Menu", "menu"], [10, "Close", "close"]];
-  FM.fkeysEl.innerHTML = F.map(([n, l, id]) => `<button data-cmd="${id}" title="${esc(id === "edit" ? CMD.edit.why() : (CMD[id]?.tip || CMD[id]?.label || l) + ` (F${n})`)}"
-      ${id === "edit" ? 'aria-disabled="true"' : ""} aria-label="${esc(`F${n} ${CMD[id]?.label || l}`)}"><kbd>F${n}</kbd><span>${l}</span></button>`).join("");
+  FM.fkeysEl.innerHTML = F.map(([n, l, id]) => `<button data-cmd="${id}" title="${esc((CMD[id]?.tip || CMD[id]?.label || l) + ` (F${n})`)}"
+      aria-label="${esc(`F${n} ${CMD[id]?.label || l}`)}"><kbd>F${n}</kbd><span>${l}</span></button>`).join("");
   FM.fkeysEl.addEventListener("mousedown", e => { if (e.target.closest("button")) e.preventDefault(); });   // keep focus on the grid
   FM.fkeysEl.onclick = ev => { const b = ev.target.closest("button"); if (b) run(b.dataset.cmd); };
 }
@@ -1183,6 +1240,13 @@ function actionsMenu() {
     { label: "Select matching items…", keys: "+", run: () => maskDialog(true) },
     { label: "Find files…", keys: "Alt+F7", icon: ICON.zoom, run: findDlg },
     { label: "Quick view", keys: "Ctrl+Q", checked: !!FM.quick, run: toggleQuick },
+    "-",
+    { label: "Edit", keys: "F4", disabled: CMD.edit.why() || false, run: () => run("edit") },
+    { label: "Checksums…", disabled: CMD.checksums.why() || false, run: () => run("checksums") },
+    { label: "Compare folders…", keys: "Ctrl+X D", run: () => run("compare") },
+    t.kind === "archive" ? { label: "Extract…", keys: "F5", run: () => run("extract") } : null,
+    t.kind === "archive" || (one && ARCH_RE.test(one.n)) ? { label: "Extract the whole archive…", keys: "Alt+F9", run: () => run("extractAll") } : null,
+    t.kind === "dir" ? { label: "Create ZIP archive…", keys: "Alt+F5", disabled: CMD.pack.why() || false, run: () => run("pack") } : null,
   ]));
 }
 function filesMenu() {
@@ -1205,6 +1269,21 @@ function filesMenu() {
     { header: "Commands" },
     { label: "Find files…", keys: "Alt+F7", run: () => run("find") },
     { label: "Branch view", keys: "Ctrl+B", checked: t.branch, run: () => run("branch") },
+    { label: "Edit file", keys: "F4", run: () => run("edit") },
+    { label: "New file, then edit it…", keys: "Shift+F4", run: () => run("newedit") },
+    { label: "Checksums…", run: () => run("checksums") },
+    { label: "Create ZIP archive…", keys: "Alt+F5", run: () => run("pack") },
+    { label: "Extract the whole archive…", keys: "Alt+F9", run: () => run("extractAll") },
+    "-",
+    { header: "Compare and sync" },
+    { label: "Compare folders…", keys: "Ctrl+X D", run: () => run("compare") },
+    FM.cmp ? { label: "Show only differences", checked: FM.cmp.onlyDiff, run: () => run("cmponly") } : null,
+    FM.cmp ? { label: "Select differences", run: () => run("cmpsel") } : null,
+    FM.cmp ? { label: "Review sync…", disabled: CMD.sync.why() || false, run: () => run("sync") } : null,
+    FM.cmp ? { label: "Compare again", keys: "Ctrl+R", run: () => run("cmpagain") } : null,
+    FM.cmp ? { label: "Close comparison", run: () => run("cmpclose") } : null,
+    "-",
+    { header: "More" },
     { label: "Rename several items…", keys: "Ctrl+M", run: () => run("mrename") },
     { label: "Quick view", keys: "Ctrl+Q", checked: !!FM.quick, run: () => run("quick") },
     { label: "Undo", keys: "Ctrl+Z", disabled: need.undo() || false, run: () => run("undo") },
@@ -1219,6 +1298,7 @@ function closeFiles() {
   setMode(back);
 }
 function swapPanes() {
+  if (FM.cmp) exitCompare(true);
   if (FM.quick) closeQuick();
   const [a, b] = FM.panes;
   [a.tabs, b.tabs] = [b.tabs, a.tabs];
@@ -1231,7 +1311,7 @@ function swapPanes() {
 }
 function toggleBranch() {
   const P = AP(), t = tabOf(P);
-  if (t.kind === "find") return;
+  if (t.kind !== "dir") return;
   go(P, t.path, { branch: !t.branch }).then(ok => { if (ok) announce(t.branch ? `Branch view: ${items(t.rows.length)}${t.truncated ? ", first ones only" : ""}.` : "Branch view off."); });
 }
 
@@ -1284,8 +1364,11 @@ async function reveal(p) {
 async function enter(P, r) {
   const t = tabOf(P);
   r ||= t.view[t.cur];
-  if (!r || t.loading) return;
+  if (!r || t.loading || r._missing) return;
+  if (t.kind === "archive") return isDir(r) ? archInto(P, t, r) : ARCH_RE.test(r.n) ? toast("Extract this archive before opening it.") : openViewer(false, r);
+  if (t.kind === "cmp" && isDir(r)) { const p = rowPath(t, r); exitCompare(true); return go(P, p); }
   const p = rowPath(t, r);
+  if (!isDir(r) && r.k === "f" && ARCH_RE.test(r.n) && t.kind === "dir" && !t.branch) return openArchive(P, r);
   if (isDir(r)) {
     if (t.kind === "find" || t.branch) return addTab(P, p);
     return go(P, p);
@@ -1358,14 +1441,14 @@ function applySizes(sizes, paths, quiet) {
   const asked = new Set((paths || []).map(norm));
   for (const P of FM.panes) {
     let touched = false;
-    for (const t of P.tabs) {
+    for (const t of FM.cmp ? [...P.tabs, FM.cmp.tabs[P.side]] : P.tabs) {
       let hit = false;
       for (const r of t.rows) {
         const k = norm(rowPath(t, r));
         if (m.has(k)) { r.s = m.get(k); r._sz = "calc"; r._calc = false; hit = true; }
         else if (r._calc && asked.has(k)) { r._calc = false; hit = true; }
       }
-      if (hit) { resort(t); if (tabOf(P) === t) touched = true; }
+      if (hit) { if (t.kind === "cmp") { let m = 0; for (const r of t.rows) if (r.s > m) m = r.s; t.maxS = m; } else resort(t); if (tabOf(P) === t) touched = true; }
     }
     if (touched) { renderRows(P, true); ensureVisible(P); renderRows(P); renderStatus(P); }
   }
@@ -1376,12 +1459,13 @@ function applySizes(sizes, paths, quiet) {
 }
 function stopSizes() {
   for (const j of FM.jobs) if (j.op === "sizes" && ACTIVE.has(j.state)) api("fm_control", { job: j.id, action: "cancel" }).catch(() => {});
-  for (const P of FM.panes) for (const t of P.tabs) for (const r of t.rows) r._calc = false;
+  for (const P of FM.panes) for (const t of FM.cmp ? [...P.tabs, FM.cmp.tabs[P.side]] : P.tabs) for (const r of t.rows) r._calc = false;
   FM.panes.forEach(P => { renderRows(P, true); renderStatus(P); });
 }
 
 /* ------------------------------------------------------------------ masks */
 function maskDialog(select) {
+  if (FM.cmp) return toast("In a comparison, use Select differences.");
   const P = AP(), t = tabOf(P);
   const verb = select ? "Select" : "Deselect";
   const d = dlg("", `<h3>${verb} matching items</h3>
@@ -1581,7 +1665,7 @@ function inlineRename(P) {
   inp.addEventListener("blur", () => { if (!busy) setTimeout(endRename, 0); });
 }
 function endRename() { const r = FM.renameEl; FM.renameEl = null; if (r?.isConnected) r.remove(); }
-function newItem(kind) {
+function newItem(kind, o = {}) {
   const P = AP(), t = tabOf(P), what = kind === "dir" ? "folder" : "file";
   const d = dlg("", `<h3>New ${what}</h3><div class="dpath">${esc(t.path)}</div>
     <label class="fm-field"><span>Name</span><input type="text" id="fmNew" value="${kind === "dir" ? "New folder" : "New file.txt"}" spellcheck="false" autocomplete="off"></label>
@@ -1605,7 +1689,8 @@ function newItem(kind) {
     let st;
     try { st = await api("fm_start", { plan: pl.plan, exclude: [], conflict: "skip", confirm: false }); } catch (e) { st = { error: e.message }; }
     if (st.error) return fail(st.error);
-    FM.pending.set(st.job, { op: kind === "dir" ? "mkdir" : "mkfile", P, t, focus: nm });
+    const made = join(t.path, nm);
+    FM.pending.set(st.job, { op: kind === "dir" ? "mkdir" : "mkfile", P, t, focus: nm, onDone: o.edit ? j => { if (j.state === "done") setTimeout(() => openEditor(made), 200); } : null });
     d.close();
     pollJobs();
   };
@@ -1627,6 +1712,7 @@ async function pollJobs() {
       FM.pending.delete(id);                       // finished and already gone from the list
       finish({ id, op: m.op, state: "done", done: {}, total: {}, errors: [] }, m);
     }
+    for (const j of FM.jobs) if (ACTIVE.has(j.state)) FM.watch.get(j.id)?.(j);
     renderJobs();
     maybeAsk();
     FM.jobsHook?.();
@@ -1649,6 +1735,9 @@ function track(j) {
 }
 function finish(j, m) {
   FM.seen.set(j.id, "finished");
+  FM.watch.delete(j.id);
+  if (m.onDone && m.op !== "find") { try { m.onDone(j); } catch (e) { console.error(e); } if (!MUT(j.op || m.op)) return; }
+  if (FM.cmp && MUT(j.op || m.op) && j.state !== "failed" && (j.op || m.op) !== "edit_save") setTimeout(cmpAgain, 300);
   if (j.op === "sizes" || m.op === "sizes") return applySizes(j.result?.sizes, m.paths);
   if (j.op === "find" || m.op === "find") return m.onDone?.(j);
   const errs = j.errors || [];
@@ -1662,7 +1751,7 @@ function finish(j, m) {
     toast(msg, "ok", "", j.journal ? { label: "Undo", run: () => undo(j.journal) } : null);
     announce(msg);
   } else if (j.state === "failed") {
-    toast(j.summary || "The operation didn't finish.", "error", errs[0]?.message || "", { label: "Jobs", run: jobsDlg });
+    toast(j.summary || "The operation didn't finish.", "error", errs[0] ? errLine(errs[0]) : "", { label: "Jobs", run: jobsDlg });
     alertEl.textContent = j.summary || "The operation didn't finish.";
   }
   // operations untag what they processed, like other two-pane managers
@@ -1772,7 +1861,7 @@ function showAsk(j, key) {
   let answered = false;
   const conflict = q.kind === "conflict";
   const html = conflict
-    ? `<h3>‘${esc(baseName(q.dst || q.src))}’ already exists in ${esc(dirName(q.dst || q.src))}.</h3>
+    ? `<h3>‘${esc(itemName(q.dst || q.src))}’ already exists in ${esc(dirName(q.dst || q.src) || q.dst || q.src)}.</h3>
        <div class="fm-cmp"><span></span><b>Size</b><b>Modified</b>
          <b>Copying</b><span>${q.srcSize != null ? fmt(q.srcSize) : "—"}</span><span>${q.srcTime ? esc(new Date(q.srcTime * 1000).toLocaleString()) : "—"}</span>
          <b>Existing</b><span>${q.dstSize != null ? fmt(q.dstSize) : "—"}</span><span>${q.dstTime ? esc(new Date(q.dstTime * 1000).toLocaleString()) : "—"}</span></div>
@@ -1784,7 +1873,7 @@ function showAsk(j, key) {
   const d = dlg("", `${html}<div class="row-actions">${choices.map(c => `<button class="btn ${c === "abort" ? "danger" : c === safe ? "primary" : ""}" data-a="${c}">${esc(LABEL[c] || c)}</button>`).join("")}</div>`,
     { onClose: () => { if (!answered) { FM.askDismissed = key; announce("The job is waiting. Press Answer in the job strip when you're ready."); } } });
   d.setAttribute("role", "alertdialog");
-  alertEl.textContent = conflict ? `${baseName(q.dst || q.src)} already exists. Choose what to do.` : (q.message || "The operation needs a decision.");
+  alertEl.textContent = conflict ? `${itemName(q.dst || q.src)} already exists. Choose what to do.` : (q.message || "The operation needs a decision.");
   d.querySelectorAll("[data-a]").forEach(b => b.onclick = async () => {
     answered = true;
     const all = !!$("#fmAll")?.checked;
@@ -1801,12 +1890,12 @@ function jobsDlg() {
     if (!d.open || !d.classList.contains("fm-jobsdlg")) { FM.jobsHook = null; return; }
     const act = FM.jobs.filter(j => ACTIVE.has(j.state)), fin = FM.jobs.filter(j => !ACTIVE.has(j.state) && j.errors?.length);
     const focusKey = document.activeElement?.dataset?.k;
-    $("#fmJA").innerHTML = act.length ? act.map(j => `<div class="j"><b>${esc(j.title || j.op)}</b><small>${esc(j.state === "running" ? jobLine(j) || "Working…" : j.state)}${j.current ? ` · ${esc(baseName(j.current))}` : ""}</small>
+    $("#fmJA").innerHTML = act.length ? act.map(j => `<div class="j"><b>${esc(j.title || j.op)}</b><small>${esc(j.state === "running" ? jobLine(j) || "Working…" : j.state)}${j.current ? ` · ${esc(itemName(j.current))}` : ""}</small>
         <span class="a">${j.state === "waiting" ? `<button class="btn" data-k="ans${j.id}" data-ans="${j.id}">Answer</button>` : ""}
           ${j.state === "running" || j.state === "paused" ? `<button class="btn" data-k="p${j.id}" data-ctl="${j.id}" data-act="${j.state === "paused" ? "resume" : "pause"}">${j.state === "paused" ? "Resume" : "Pause"}</button>` : ""}
           <button class="btn" data-k="c${j.id}" data-ctl="${j.id}" data-act="cancel">Cancel</button></span></div>`).join("")
       : `<div class="tnote">Nothing is running.</div>`;
-    $("#fmJE").innerHTML = fin.map(j => `<div class="j"><b>${esc(j.summary || j.title || j.op)}</b><span class="errs">${j.errors.slice(0, 5).map(x => `${esc(baseName(x.path || ""))}: ${esc(x.message)}`).join("<br>")}${j.errors.length > 5 ? `<br>…and ${j.errors.length - 5} more` : ""}</span></div>`).join("");
+    $("#fmJE").innerHTML = fin.map(j => `<div class="j"><b>${esc(j.summary || j.title || j.op)}</b><span class="errs">${j.errors.slice(0, 5).map(x => esc(errLine(x))).join("<br>")}${j.errors.length > 5 ? `<br>…and ${j.errors.length - 5} more` : ""}</span></div>`).join("");
     $("#fmJH").innerHTML = FM.hist.length ? FM.hist.slice(0, 50).map(h => `<div class="j"><b>${esc(h.summary || h.op)}</b><small>${h.time ? esc(when(h.time)) : ""}</small>
         <span class="a">${h.undo ? `<button class="btn" data-k="u${h.id}" data-undo="${esc(h.undo)}">Undo</button>` : h.op === "delete" ? `<span class="cant">Cannot undo</span>` : ""}</span></div>`).join("")
       : `<div class="tnote">No file operations yet.</div>`;
@@ -1832,7 +1921,7 @@ function rowDragStart(P, e) {
   const el = e.target.closest(".fm-row");
   if (!el) return;
   const t = tabOf(P), r = t.view[+el.dataset.i];
-  if (!r) return;
+  if (!r || (t.kind !== "dir" && t.kind !== "find")) { e.preventDefault(); return; }
   const rows = r._t ? t.rows.filter(x => x._t) : [r];
   FM.drag = { P, t, rows, paths: rows.map(x => rowPath(t, x)) };
   e.dataTransfer.effectAllowed = "copyMove";
@@ -1895,7 +1984,8 @@ function wireStageDrop() {
 const VCHUNK = 262144, VCAP = 8 * 1048576, SCHUNK = 1048576, HEXL = 18, HBLK = 65536;
 let V = null;
 async function readRange(path, offset, length) {
-  const r = await api("fm_read", { path, offset, length });
+  const r = typeof path === "object" ? await api("fm_archive_read", { archive: path.archive, member: path.member, offset, length })
+                                     : await api("fm_read", { path, offset, length });
   if (r.error) throw new Error(r.error);
   return { bytes: b64(r.data), size: r.size, eof: !!r.eof };
 }
@@ -1917,7 +2007,7 @@ function openViewer(hex, rowIn) {
     </div>
     <div class="fm-vbody" id="fmVB" tabindex="0" aria-label="File contents"></div>
     <div class="row-actions"><button class="btn" id="fmVOpen">${ICON.launch}Open with default app</button><button class="btn primary" data-cancel>Close</button></div>`,
-    { onClose: () => { if (V) V.tok++; d.querySelectorAll("video,audio").forEach(m => m.pause()); V = null; } });
+    { onClose: () => { if (V) { V.tok++; if (V.blob) URL.revokeObjectURL(V.blob); } d.querySelectorAll("video,audio").forEach(m => m.pause()); V = null; } });
   V = { P, t, r, tok: 0, hex };
   $("#fmVB").focus();
   $("#fmVMode").addEventListener("click", e => { const b = e.target.closest("button"); if (b) vShow(b.dataset.m); });
@@ -1951,12 +2041,15 @@ function openViewer(hex, rowIn) {
 }
 function vLoad() {
   const r = V.r;
-  V.path = rowPath(V.t, r);
+  V.path = srcOf(V.t, r);
+  V.disp = rowPath(V.t, r);
+  if (V.blob) { URL.revokeObjectURL(V.blob); V.blob = null; }
+  $("#fmVOpen").hidden = typeof V.path === "object";
   V.kind = mediaKind(r.n);
   V.size = r.s;
   V.match = -1; V.hm = -1; V.hlen = 0;
   $("#fmVT").textContent = baseName(r.n);
-  $("#fmVP").textContent = V.path;
+  $("#fmVP").textContent = V.disp + (typeof V.path === "object" ? " (inside a read-only archive)" : "");
   $("#fmVMode [data-m=media]").hidden = !V.kind;
   vShow(V.hex ? "hex" : V.kind ? "media" : "text");
   V.hex = false;
@@ -1994,7 +2087,14 @@ function vShow(mode) {
   return vText(0);
 }
 function vMedia(body) {
-  const url = fmURL(V.path), name = esc(baseName(V.r.n));
+  if (typeof V.path === "object" && !V.blob) {
+    const my = V.tok;
+    body.innerHTML = `<div class="loading">${SPIN}Loading…</div>`;
+    memberBlob(V.path, V.r.s, V.kind, 256 * 1048576).then(u => { if (!V || my !== V.tok) return URL.revokeObjectURL(u); V.blob = u; vMedia(body); })
+      .catch(e => { if (V && my === V.tok) body.innerHTML = `<div class="empty"><b>${esc(e.message)}</b></div>`; });
+    return;
+  }
+  const url = V.blob || fmURL(V.path), name = esc(baseName(V.r.n));
   body.classList.add("media");
   const none = `<div class="empty"><b>No preview available.</b>Open this file with its usual app.</div>`;
   if (V.kind === "img") body.innerHTML = `<img src="${url}" alt="${name}">`;
@@ -2220,6 +2320,7 @@ function closeQuick() {
   if (!FM.quick) return;
   const Q = FM.quick.P;
   Q.el.quick.querySelectorAll("video,audio").forEach(m => m.pause());
+  if (FM.quick.blob) URL.revokeObjectURL(FM.quick.blob);
   Q.el.quick.hidden = true; Q.el.quick.innerHTML = "";
   FM.quick = null;
 }
@@ -2234,7 +2335,9 @@ async function quickNow() {
   const head = `<div class="fm-qhead"><div class="t"><h3>Quick view · ${esc(r ? baseName(r.n) : "nothing selected")}</h3><button class="btn" data-q="close">Close quick view</button></div>
     <div class="dest" title="${esc(dest)}">Underneath: ${esc(dest)}</div></div>`;
   if (!r) { el.innerHTML = head + `<div class="fm-qbody"><div class="empty">Nothing to show.</div></div>`; return; }
-  const p = rowPath(t, r), kind = isDir(r) ? null : mediaKind(r.n);
+  if (r._missing) { el.innerHTML = head + `<div class="fm-qbody"><div class="empty">Missing on this side.</div></div>`; return; }
+  const p = rowPath(t, r), src = srcOf(t, r), member = typeof src === "object", kind = isDir(r) ? null : mediaKind(r.n);
+  if (q.blob) { URL.revokeObjectURL(q.blob); q.blob = null; }
   const info = `<dl class="fm-qinfo"><dt>Type</dt><dd>${esc(typeName(r))}</dd><dt>Size</dt><dd>${r.s != null ? `${fmt(r.s)}${r.a != null && r.a !== r.s ? ` (${fmt(r.a)} on disk)` : ""}` : "Not in the last scan. Press Space to calculate."}</dd>
     <dt>Modified</dt><dd>${r.m ? esc(new Date(r.m * 1000).toLocaleString()) : "—"}</dd><dt>Where</dt><dd class="mono">${esc(p)}</dd>${r.p ? `<dt>Protected</dt><dd>${esc(r.p)}</dd>` : ""}${r.h ? `<dt>Hidden</dt><dd>Yes</dd>` : ""}</dl>`;
   let body;
@@ -2246,9 +2349,19 @@ async function quickNow() {
   else body = `<div class="loading">${SPIN}Loading…</div>`;
   el.innerHTML = head + `<div class="fm-qbody">${body}</div>`;
   el.querySelector("img,video,audio")?.addEventListener("error", () => { const b = el.querySelector(".fm-qbody"); if (b) b.innerHTML = `<div class="empty"><b>No preview available.</b>Open this file with its usual app.</div>${info}`; });
+  if (member && kind && !isDir(r)) {
+    try {
+      const u = await memberBlob(src, r.s, kind, 32 * 1048576);
+      if (!FM.quick || my !== FM.quick.tok) return URL.revokeObjectURL(u);
+      q.blob = u;
+      const m = el.querySelector("img,video,audio,iframe");
+      if (m) m.src = u;
+    } catch (e) { const b = el.querySelector(".fm-qbody"); if (b && FM.quick?.tok === my) b.innerHTML = `<div class="empty"><b>${esc(e.message)}</b></div>${info}`; }
+    return;
+  }
   if (isDir(r) || r.k === "l" || kind) return;
   try {
-    const res = await readRange(p, 0, 65536);
+    const res = await readRange(src, 0, 65536);
     if (!FM.quick || my !== FM.quick.tok) return;
     const b = el.querySelector(".fm-qbody");
     if (res.bytes.includes(0)) { b.innerHTML = `<div style="display:grid;gap:12px;width:100%"><div class="empty"><b>No preview available.</b>Open this file with its usual app.</div>${info}</div>`; return; }
@@ -2306,7 +2419,7 @@ function findDlg() {
     FM.findHook = () => {
       const j = FM.jobs.find(x => x.id === job);
       const el = $("#fmFPT");
-      if (j && el) el.textContent = `Searching… ${(j.result?.rows?.length ?? j.done?.n ?? 0).toLocaleString()} found${j.current ? ` · ${baseName(j.current)}` : ""}`;
+      if (j && el) el.textContent = `Searching… ${(j.result?.rows?.length ?? j.done?.n ?? 0).toLocaleString()} found${j.current ? ` · ${itemName(j.current)}` : ""}`;
     };
     FM.pending.set(job, { op: "find", onDone: j => {
       FM.findHook = null;
@@ -2452,8 +2565,10 @@ function helpDlg() {
   dlg("fm-wide", `<h3>Keyboard</h3><p>Files puts its keys first while it's open. Typing in a box, a dialog or the viewer uses their own keys.</p>
     <div class="fm-keys"><h4>Moving around</h4>${nav.map(([k, l]) => row(k, l)).join("")}
     ${Object.entries(groups).map(([g, cs]) => `<h4>${esc(g)}</h4>${cs.map(c => row(c.keys, c.label)).join("")}`).join("")}
-    <h4>Viewer</h4>${row("F3 / Shift+F3", "Next / previous match")}${row("F4", "Switch between text and hex")}${row("Ctrl+PgUp / Ctrl+PgDn", "Previous / next file")}${row("Escape or F10", "Close")}</div>
-    <p class="fm-note" style="margin-top:12px">F4 Edit isn't available yet: view with F3, or open the file with its usual app.</p>
+    <h4>Viewer</h4>${row("F3 / Shift+F3", "Next / previous match")}${row("F4", "Switch between text and hex")}${row("Ctrl+PgUp / Ctrl+PgDn", "Previous / next file")}${row("Escape or F10", "Close")}
+    <h4>Editor</h4>${row("Ctrl+S", "Save")}${row("Ctrl+F / Ctrl+H", "Search / replace")}${row("Ctrl+G", "Go to line")}${row("F3 / Shift+F3", "Next / previous match")}${row("Ctrl+Z / Ctrl+Y", "Undo / redo")}${row("Escape or F10", "Close (asks about unsaved changes)")}
+    <h4>Archives</h4>${row("Enter", "Open a .zip or .tar archive, or a folder inside it")}${row("Backspace", "Up a level; at the top, back to the folder")}${row("F5", "Extract")}${row("Alt+F9", "Extract the whole archive")}</div>
+    <p class="fm-note" style="margin-top:12px">Archives are read-only. Compare folders with Ctrl+X, then D.</p>
     <div class="row-actions"><button class="btn primary" data-cancel>Close</button></div>`);
   $("#dlg [data-cancel]").focus({ preventScroll: true });
   $("#dlg").scrollTop = 0;
@@ -2499,6 +2614,1247 @@ function hotlistDlg() {
   (d.querySelector("[data-go]") || $("#fmHAdd")).focus();
 }
 
+/* ================================================================== round two: compare, sync, archives, checksums, editor */
+const isRoot = p => /^[A-Za-z]:[\\/]?$/.test(p || "") || /^[\\/]+$/.test(p || "") || /^\\\\[^\\]+\\[^\\]+\\?$/.test(p || "");
+const itemName = p => !p ? "" : isRoot(p) ? p : baseName(p);
+const errLine = x => x.path ? `${itemName(x.path)} — ${x.message}` : x.message;
+const ARCH_RE = /\.(zip|tar|tgz|tar\.gz|tar\.bz2|tar\.xz)$/i;
+const RO_ARCH = "Archive contents are read-only.";
+const RO_CMP = "Close comparison to change these files.";
+const roWhy = () => FM.cmp ? RO_CMP : AT().kind === "archive" ? RO_ARCH : "";
+/* page through a session result (comparison, checksums) */
+async function fetchResults(result, onProgress, cap = 200000) {
+  const rows = [];
+  let total = Infinity, info = {};
+  for (let off = 0; off < Math.min(total, cap); off += 500) {
+    const r = await api("fm_results", { result, offset: off, limit: 500 });
+    if (r.error) throw new Error(r.error);
+    total = r.total ?? (r.rows || []).length;
+    info = r;
+    rows.push(...(r.rows || []));
+    onProgress?.(rows.length, total);
+    if (!(r.rows || []).length) break;
+  }
+  return { rows, total: total === Infinity ? rows.length : total, complete: info.complete !== false, truncated: !!info.truncated || total > cap };
+}
+function watchJob(id, meta, onTick) {
+  FM.pending.set(id, meta);
+  if (onTick) FM.watch.set(id, onTick);
+  pollJobs();
+}
+
+/* ------------------------------------------------------------------ compare folders (Ctrl+X, D) */
+const CMP = {
+  onlyleft: ["←", "Only left", "pres"], onlyright: ["→", "Only right", "pres"], newerleft: ["↑", "Newer left", "newer"],
+  newerright: ["↓", "Newer right", "newer"], different: ["≠", "Different", "newer"], same: ["=", "Same", "same"], nc: ["!", "Not compared", "fail"],
+};
+function cmpKey(s) {
+  const k = String(s || "").toLowerCase().replace(/[^a-z]/g, "");
+  if (k in CMP) return k;
+  if (k === "leftonly" || k === "left") return "onlyleft";
+  if (k === "rightonly" || k === "right") return "onlyright";
+  if (k === "leftnewer") return "newerleft";
+  if (k === "rightnewer") return "newerright";
+  if (k === "differs" || k === "diff" || k === "conflict" || k === "typeconflict" || k === "type") return "different";
+  if (k === "equal" || k === "identical") return "same";
+  return "nc";
+}
+const isDiffKey = k => k === "onlyleft" || k === "onlyright" || k === "newerleft" || k === "newerright" || k === "different";
+const quietNC = c => /folder contents|link\./i.test(c.reason || "");
+const inDiffView = c => isDiffKey(c._k) || (c._k === "nc" && !quietNC(c));
+function cmpText(c) {
+  if (c._k !== "nc") return CMP[c._k][1];
+  const why = String(c.reason || "").replace(/^Not compared:\s*/i, "").replace(/\.$/, "");
+  return why ? `Not compared: ${why}` : "Not compared";
+}
+function realTab(P) { return P.tabs[P.ti]; }
+function compareDlg() {
+  const L = realTab(FM.panes[0]), R = realTab(FM.panes[1]);
+  const pick = t => t.kind === "dir" && !t.error ? t.path : "";
+  const d = dlg("", `<h3>Compare folders</h3>
+    <label class="fm-field"><span>Left folder</span><input type="text" id="fmCL" class="mono" value="${esc(FM.cmp?.left || pick(L))}" spellcheck="false" autocomplete="off"></label>
+    <label class="fm-field"><span>Right folder</span><input type="text" id="fmCR" class="mono" value="${esc(FM.cmp?.right || pick(R))}" spellcheck="false" autocomplete="off"></label>
+    <div class="fm-checks" role="radiogroup" aria-label="How to compare">
+      <label><input type="radio" name="fmCM" value="quick" ${FM.cmp?.mode !== "thorough" ? "checked" : ""}> Quick</label>
+      <label><input type="radio" name="fmCM" value="thorough" ${FM.cmp?.mode === "thorough" ? "checked" : ""}> Thorough</label></div>
+    <p class="fm-note">Quick compares names, sizes and modified times. Thorough also compares file contents using SHA-256.</p>
+    <div class="fm-checks"><label><input type="checkbox" id="fmCS"> Include subfolders</label><label><input type="checkbox" id="fmCH" ${FM.hidden ? "checked" : ""}> Include hidden</label></div>
+    <p class="form-error" id="fmErr" hidden></p>
+    <div class="row-actions"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-primary>Compare</button></div>`);
+  $("#dlg [name=fmCM]:checked").focus();
+  d.querySelector("[data-primary]").onclick = () => {
+    const left = $("#fmCL").value.trim(), right = $("#fmCR").value.trim(), err = $("#fmErr");
+    const a = norm(left).replace(/[\\/]+$/, ""), b = norm(right).replace(/[\\/]+$/, "");
+    const inside = (x, y) => y.startsWith(x + "\\") || y.startsWith(x + "/") || (isRoot(x + FM.sep) && y.startsWith(x));
+    let msg = "";
+    if (!left || !right) msg = "Choose a folder on each side.";
+    else if (a === b) msg = "Choose two different folders.";
+    else if (inside(a, b) || inside(b, a)) msg = "One folder is inside the other. Choose folders that don't overlap.";
+    if (msg) { err.textContent = msg; err.hidden = false; return; }
+    d.close();
+    startCompare({ left, right, mode: $("#dlg [name=fmCM]:checked").value, recursive: $("#fmCS").checked, hidden: $("#fmCH").checked });
+  };
+}
+async function startCompare(o) {
+  if (FM.cmp?.job && FM.cmp.state === "running") control(FM.cmp.job, "cancel");
+  let r;
+  try { r = await api("fm_compare", { left: o.left, right: o.right, mode: o.mode, recursive: o.recursive, hidden: o.hidden }); } catch (e) { r = { error: e.message }; }
+  if (r.error) return toast(r.error, "error");
+  if (FM.quick) closeQuick();
+  endRename(); endJump();
+  const wasIn = !!FM.cmp;
+  if (!wasIn) FM.panes.forEach(P => { const t = realTab(P); if (t) t.scrollTop = P.el.scroll.scrollTop; });
+  const crumbsOf = p => {
+    const parts = p.split(/[\\/]+/).filter(Boolean), out = [];
+    let acc = "";
+    if (/^[A-Za-z]:/.test(p)) { acc = parts.shift() + "\\"; out.push({ n: acc.slice(0, -1), path: acc }); }
+    else if (p.startsWith("/")) { acc = "/"; out.push({ n: "/", path: "/" }); }
+    for (const x of parts) { acc = join(acc, x); out.push({ n: x, path: acc }); }
+    return out;
+  };
+  const mk = (side, path) => Object.assign(newTab(path, { kind: "cmp" }), { kind: "cmp", loaded: false, path, crumbs: crumbsOf(path) });
+  FM.cmp = { ...o, job: r.job, state: "running", total: 0, counts: null, selected: 0, tagAdd: new Set(), tagRem: new Set(), gen: 0,
+             complete: false, truncated: false, onlyDiff: FM.cmp?.onlyDiff ?? true, tabs: [mk(0, o.left), mk(1, o.right)], prog: "" };
+  FM.panes.forEach(P => { for (const [, el] of P.pool) { el.remove(); P.free.push(el); } P.pool.clear(); P.el.scroll.scrollTop = 0; renderPane(P); });
+  renderCmpBar();
+  focusGrid();
+  announce("Comparing folders…");
+  const job = r.job;
+  watchJob(job, { op: "compare", onDone: j => cmpDone(j, job) }, j => {
+    if (FM.cmp?.job !== job) return;
+    FM.cmp.prog = j.total?.n ? `${(j.done?.n || 0).toLocaleString()} of ${j.total.n.toLocaleString()}` : j.done?.n ? `${j.done.n.toLocaleString()} checked` : "";
+    FM.panes.forEach(renderMsg);
+    renderCmpBar();
+  });
+}
+/* comparison rows live on the server: the panes fetch 500-row pages for what's on screen (plus overscan) and keep them */
+const CPG = 500;
+const CSTUB = [0, 1].map(() => ({ n: "", k: "f", s: null, m: 0, c: 8, _stub: true, _missing: true, _c: null, _k: "same" }));
+function cmpRow(x) {
+  const k = cmpKey(x.status), rel = String(x.rel ?? x.n ?? "").replace(/[\\/]/g, FM.sep);
+  const cr = { ...x, rel, _k: k };
+  cr._sr = [0, 1].map(side => {
+    const it = side ? x.right : x.left;
+    const base = it ? { ...it } : { k: (x.left || x.right)?.k || "f", s: null, m: 0, c: 8 };
+    delete base.path;
+    return Object.assign(base, { n: rel, _c: cr, _k: k, _missing: !it, _t: !!x.tagged && !!it });
+  });
+  return cr;
+}
+async function cmpDone(j, job) {
+  const c = FM.cmp;
+  if (!c || c.job !== job) return;
+  const res = j.result || {};
+  if (j.state === "failed" || !res.result) {
+    c.state = j.state === "cancelled" ? "stopped" : "failed";
+    c.msg = j.state === "cancelled" ? "Comparison stopped. Results are incomplete." : j.errors?.[0]?.message || j.summary || "The comparison didn't finish.";
+    c.counts = { all: 0, diff: 0, same: 0 };
+    FM.panes.forEach(renderPane); renderCmpBar();
+    if (j.state === "failed") alertEl.textContent = c.msg;
+    return;
+  }
+  c.result = res.result;
+  c.complete = j.state === "done" && res.complete !== false;
+  c.truncated = !!res.truncated;
+  c.stopped = j.state === "cancelled";
+  await cmpLoad(false);
+  if (FM.cmp !== c || c.state === "failed") return;
+  const n = c.counts;
+  announce(c.stopped ? "Comparison stopped. Results are incomplete." : !n.all ? "These folders are empty." : n.diff ? `Comparison finished: ${c.summary}.` : "No differences found.");
+}
+/* (re)start paging for the current filter: totals first, then the visible pages */
+async function cmpLoad(keepCursor) {
+  const c = FM.cmp, gen = c.gen = (c.gen || 0) + 1;
+  c.state = "loading";
+  FM.panes.forEach(renderMsg);
+  const q = filter => api("fm_results", { result: c.result, offset: 0, limit: 1, filter });
+  let a, d, s;
+  try { [a, d, s] = await Promise.all([q("all"), q("differences"), q("same")]); } catch (e) { a = { error: e.message }; }
+  if (FM.cmp !== c || gen !== c.gen) return;
+  const bad = [a, d, s].find(x => x?.error);
+  if (bad) { c.state = "failed"; c.msg = bad.error; FM.panes.forEach(renderPane); renderCmpBar(); return; }
+  c.counts = { all: a.total, diff: d.total, same: s.total };
+  c.selected = a.selected || 0;
+  c.complete = c.complete && a.complete !== false;
+  c.truncated = c.truncated || !!a.truncated;
+  const nc = c.counts.all - c.counts.diff - c.counts.same;
+  c.summary = `${plural(c.counts.diff, "difference")} · ${c.counts.same.toLocaleString()} same${nc > 0 ? ` · ${nc.toLocaleString()} not compared` : ""}`;
+  c.state = c.stopped ? "stopped" : "ready";
+  cmpRefill(keepCursor);
+}
+function cmpRefill(keepCursor) {
+  const c = FM.cmp;
+  c.gen++;
+  c.filter = c.onlyDiff ? "differences" : "all";
+  c.total = c.onlyDiff ? c.counts.diff : c.counts.all;
+  c.pages = new Set(); c.pend = new Set();
+  c.tabs.forEach((T, side) => {
+    T.view = new Array(c.total).fill(CSTUB[side]);
+    T.sorted = T.view; T.rows = []; T.maxS = 0;
+    T.loaded = true; T.loading = false;
+    T.cur = keepCursor ? clamp(T.cur, 0, Math.max(0, c.total - 1)) : 0;
+    recount(T);
+  });
+  FM.panes.forEach(P => {
+    for (const [, el] of P.pool) { el.remove(); P.free.push(el); }
+    P.pool.clear();
+    if (!keepCursor) P.el.scroll.scrollTop = 0;
+    renderPane(P); ensureVisible(P); renderRows(P);
+  });
+  renderCmpBar();
+}
+function cmpNeed(a, b) {
+  const c = FM.cmp;
+  if (!c || !c.pages || c.state === "failed") return;
+  for (let p = Math.floor(a / CPG); p <= Math.floor(Math.max(a, b - 1) / CPG); p++)
+    if (p * CPG < c.total && !c.pages.has(p) && !c.pend.has(p)) cmpPage(p);
+}
+async function cmpPage(p) {
+  const c = FM.cmp, gen = c.gen;
+  c.pend.add(p);
+  let r;
+  try { r = await api("fm_results", { result: c.result, offset: p * CPG, limit: CPG, filter: c.filter }); } catch (e) { r = { error: e.message }; }
+  if (FM.cmp !== c || gen !== c.gen) return;
+  c.pend.delete(p);
+  if (r.error) { c.state = "failed"; c.msg = r.error; FM.panes.forEach(renderPane); renderCmpBar(); return; }
+  c.pages.add(p);
+  c.selected = r.selected ?? c.selected;
+  (r.rows || []).forEach((x, k) => {
+    const cr = cmpRow(x), i = p * CPG + k;
+    c.tabs.forEach((T, side) => {
+      if (i >= T.view.length) return;
+      const sr = cr._sr[side];
+      T.view[i] = sr; T.rows.push(sr);
+      if (sr.s != null && sr.s > T.maxS) T.maxS = sr.s;
+    });
+  });
+  FM.panes.forEach(P => { recount(tabOf(P)); renderRows(P, true); renderStatus(P); });
+  if (FM.quick) quickSoon();
+}
+/* tags are kept by the server (one set per comparison row); the panes show them and the counts come back with every page */
+function cmpTag(r, on) {
+  const c = FM.cmp, cr = r._c;
+  if (!c || !cr || r._missing || !!cr.tagged === !!on) return;
+  cr.tagged = !!on;
+  cr._sr.forEach(x => { x._t = !!on && !x._missing; });
+  (on ? c.tagAdd : c.tagRem).add(cr.id);
+  (on ? c.tagRem : c.tagAdd).delete(cr.id);
+  c.selected += on ? 1 : -1;
+  clearTimeout(c.tagT);
+  c.tagT = setTimeout(cmpFlushTags, 80);
+  FM.panes.forEach(P => { if (P !== AP()) renderRows(P, true); });
+}
+async function cmpFlushTags() {
+  const c = FM.cmp;
+  if (!c) return;
+  const add = [...c.tagAdd], rem = [...c.tagRem];
+  c.tagAdd.clear(); c.tagRem.clear();
+  let r = null;
+  try {
+    if (add.length) r = await api("fm_results", { result: c.result, offset: 0, limit: 1, filter: c.filter, tagAction: "add", tagIds: add });
+    if (rem.length) r = await api("fm_results", { result: c.result, offset: 0, limit: 1, filter: c.filter, tagAction: "remove", tagIds: rem });
+  } catch (e) { r = { error: e.message }; }
+  if (FM.cmp !== c) return;
+  if (r?.error) toast(r.error, "error");
+  else if (r) c.selected = r.selected;
+  FM.panes.forEach(P => { recount(tabOf(P)); renderStatus(P); renderHead(P); });
+}
+async function cmpTagAction(action) {
+  const c = FM.cmp;
+  if (!c?.result) return;
+  clearTimeout(c.tagT);
+  await cmpFlushTags();
+  let r;
+  try { r = await api("fm_results", { result: c.result, offset: 0, limit: 1, filter: c.filter, tagAction: action }); } catch (e) { r = { error: e.message }; }
+  if (FM.cmp !== c) return;
+  if (r.error) return toast(r.error, "error");
+  c.selected = r.selected;
+  cmpRefill(true);
+  return r.selected;
+}
+async function cmpTaggedRows(side, cap = 20000) {
+  const c = FM.cmp, out = [];
+  await cmpFlushTags();
+  for (let off = 0; off < cap; off += CPG) {
+    const r = await api("fm_results", { result: c.result, offset: off, limit: CPG, filter: "tagged" });
+    if (r.error) throw new Error(r.error);
+    out.push(...(r.rows || []).map(cmpRow));
+    if (out.length >= r.total || !(r.rows || []).length) break;
+  }
+  return out.map(cr => cr._sr[side]).filter(x => !x._missing);
+}
+function cmpMirror(P) {
+  const c = FM.cmp, O = FM.panes[1 - P.side];
+  if (!c) return;
+  const T = c.tabs[P.side], U = c.tabs[O.side];
+  U.cur = T.cur;
+  if (O.el.scroll.scrollTop !== P.el.scroll.scrollTop) { FM.cmpSync = true; O.el.scroll.scrollTop = P.el.scroll.scrollTop; }
+  renderRows(O);
+}
+function exitCompare(quiet) {
+  const c = FM.cmp;
+  if (!c) return;
+  if (c.state === "running" && c.job) api("fm_control", { job: c.job, action: "cancel" }).catch(() => {});
+  if (c.tagAdd?.size || c.tagRem?.size) cmpFlushTags();
+  FM.cmp = null;
+  if (FM.quick) closeQuick();
+  renderCmpBar();
+  FM.panes.forEach(P => {
+    for (const [, el] of P.pool) { el.remove(); P.free.push(el); }
+    P.pool.clear();
+    renderPane(P);
+    P.el.scroll.scrollTop = realTab(P).scrollTop || 0;
+    ensureVisible(P); renderRows(P, true);
+    if (realTab(P).stale) load(P, realTab(P), realTab(P).path, { keep: true });
+  });
+  if (!quiet) { announce("Comparison closed."); focusGrid(); }
+}
+function cmpAgain() {
+  const c = FM.cmp;
+  if (!c) return;
+  const mode = $("#fmCmpMode")?.value || c.mode, recursive = $("#fmCmpRec") ? $("#fmCmpRec").checked : c.recursive;
+  startCompare({ left: c.left, right: c.right, mode, recursive, hidden: c.hidden });
+}
+async function selectDifferences() {
+  const c = FM.cmp;
+  if (!c?.counts?.all) return;
+  const n = await cmpTagAction("differences");
+  if (n != null) announce(`Tagged ${items(n)} that differ.`);
+}
+async function cmpCopy() {
+  const P = AP(), t = tabOf(P);
+  let rows;
+  try { rows = FM.cmp.selected ? await cmpTaggedRows(P.side) : sel(t); } catch (e) { return toast(e.message, "error"); }
+  if (!rows.length) return announce("Nothing to copy on this side.");
+  const dirs = new Set(rows.map(r => dirName(r.n) || ""));
+  if (dirs.size > 1) return toast("These items are in different subfolders. Use Review sync… to copy them.");
+  const sub = [...dirs][0], other = FM.cmp.tabs[1 - P.side].path;
+  copyMove("copy", { rows, P, dest: sub ? join(other, sub) : other });
+}
+function renderCmpBar() {
+  let bar = FM.cmpBar;
+  if (!bar) {
+    bar = FM.cmpBar = ce("div", "fm-cmpbar");
+    bar.setAttribute("role", "region"); bar.setAttribute("aria-label", "Compare folders");
+    bar.innerHTML = `<b class="ttl">Compare folders</b>
+      <select id="fmCmpMode" aria-label="How to compare"><option value="quick">Quick</option><option value="thorough">Thorough</option></select>
+      <label class="fm-cl"><input type="checkbox" id="fmCmpRec"> Include subfolders</label>
+      <button class="btn" data-c="again" title="Compare again (Ctrl+R)">Compare again</button><button class="btn" data-c="close">Close</button>
+      <span class="sep" aria-hidden="true"></span>
+      <label class="fm-cl"><input type="checkbox" id="fmCmpOnly"> Show only differences</label>
+      <button class="btn" data-c="select">Select differences</button><button class="btn primary" data-c="sync">Review sync…</button>
+      <span class="st" id="fmCmpSt" aria-live="polite"></span>`;
+    FM.root.insertBefore(bar, FM.panesEl);
+    bar.addEventListener("mousedown", e => { if (e.target.closest("button")) e.preventDefault(); });
+    bar.addEventListener("click", e => {
+      const b = e.target.closest("[data-c]");
+      if (!b || b.disabled) return;
+      ({ again: cmpAgain, close: () => exitCompare(), select: selectDifferences, sync: syncDlg })[b.dataset.c]();
+    });
+    $("#fmCmpMode").onchange = cmpAgain;
+    $("#fmCmpRec").onchange = cmpAgain;
+    $("#fmCmpOnly").onchange = e => { FM.cmp.onlyDiff = e.target.checked; if (FM.cmp.counts) cmpRefill(false); focusGrid(); };
+  }
+  const c = FM.cmp;
+  bar.hidden = !c;
+  if (!c) return;
+  $("#fmCmpMode").value = c.mode;
+  $("#fmCmpRec").checked = !!c.recursive;
+  $("#fmCmpOnly").checked = c.onlyDiff;
+  const ready = c.state === "ready" || c.state === "stopped";
+  bar.querySelector("[data-c=select]").disabled = !ready || !c.counts?.all;
+  const canSync = c.state === "ready" && c.complete && !c.truncated && c.counts?.diff > 0;
+  const sync = bar.querySelector("[data-c=sync]");
+  sync.disabled = !canSync;
+  sync.title = canSync ? "" : c.state === "ready" && (!c.complete || c.truncated) ? "Sync needs complete results. Compare again." : "Nothing to sync yet.";
+  $("#fmCmpSt").textContent = c.state === "running" ? `Comparing folders…${c.prog ? " " + c.prog : ""}` : c.state === "loading" ? "Loading results…"
+    : c.state === "failed" ? c.msg : c.state === "stopped" ? "Comparison stopped. Results are incomplete."
+    : c.truncated ? `${c.summary}. Only the first 200,000 rows were compared.` : c.summary || "";
+}
+function cmpMsg(P) {
+  const c = FM.cmp, T = c.tabs[P.side];
+  if (c.state === "running") return { html: `<div><div class="loading">${SPIN}Comparing folders…${c.prog ? ` <span class="muted">${esc(c.prog)}</span>` : ""}</div><button class="btn" data-m="cmpstop">Stop</button></div>` };
+  if (c.state === "loading") return { html: `<div class="loading">${SPIN}Loading results…</div>` };
+  if (c.state === "failed") return { err: true, html: `<div><b>${esc(c.msg)}</b><div class="row-actions"><button class="btn" data-m="cmpagain">Compare again</button><button class="btn" data-m="cmpclose">Close</button></div></div>` };
+  if (!c.counts?.all) return { html: `<div><b>${c.state === "stopped" ? "Comparison stopped. Results are incomplete." : "These folders are empty."}</b></div>` };
+  if (!T.view.length) return { html: `<div><b>No differences found.</b>${c.mode === "quick" ? `<span class="muted">Metadata matches; contents not checked.</span>` : ""}</div>` };
+  return { html: "" };
+}
+function cmpHeadHTML() {
+  return `<div role="columnheader" class="c-tag" aria-label="Tag"></div><div role="columnheader" class="c-name"><span class="hl">Name</span></div>`
+    + `<div role="columnheader" class="c-size"><span class="hl">Size</span></div><div role="columnheader" class="c-stat"><span class="hl">Status</span></div>`;
+}
+function cmpRowHTML(t, r) {
+  if (r._stub) return `<div role="gridcell" class="c-tag"></div><div role="gridcell" class="c-name"><span class="miss">…</span></div><div role="gridcell" class="c-size"></div><div role="gridcell" class="c-stat"></div>`;
+  const c = r._c, [icon, , cls] = CMP[r._k], text = cmpText(c);
+  const tip = r._k === "same" && FM.cmp?.mode === "quick" ? "Metadata matches; contents not checked." : c.reason || "";
+  const stat = `<div role="gridcell" class="c-stat"><span class="cs cs-${quietNC(c) && r._k === "nc" ? "muted" : cls}" title="${esc(tip)}"><span aria-hidden="true">${icon}</span> ${esc(text)}</span></div>`;
+  if (r._missing) return `<div role="gridcell" class="c-tag"></div><div role="gridcell" class="c-name"><span class="miss">— Missing</span></div><div role="gridcell" class="c-size"></div>${stat}`;
+  const dir = r.k === "d", b = baseName(r.n), rel = r.n.slice(0, r.n.length - b.length);
+  const icn = dir ? I.dir : r.k === "l" ? I.link : r.h ? I.hfile : I.file;
+  const size = r.s == null ? `<span class="unk">—</span>` : `${fmt(r.s)}${t.maxS && r.s > 0 ? `<i style="--p:${Math.max(.02, r.s / t.maxS).toFixed(3)}"></i>` : ""}`;
+  return `<div role="gridcell" class="c-tag"><span class="fm-check" aria-hidden="true"></span><i class="fm-dot" style="background:var(--c${dir ? 8 : r.c ?? 8})" aria-hidden="true"></i></div>`
+    + `<div role="gridcell" class="c-name">${icn}<span class="nm">${rel ? `<span class="rel nb">${esc(rel)}</span>` : ""}<span class="nb">${esc(b)}</span></span>${r.p ? `<span class="fm-lock" title="${esc(r.p)}">${I.lock}<span class="sr">Protected</span></span>` : ""}</div>`
+    + `<div role="gridcell" class="c-size">${size}</div>${stat}`;
+}
+const cmpRowLabel = r => r._stub ? "Loading" : `${r.n}, ${r._missing ? "missing on this side" : `${typeName(r)}, ${r.s == null ? "size unknown" : sizeWords(r.s)}`}, ${cmpText(r._c)}`;
+
+/* ------------------------------------------------------------------ review sync: paged rows, and only the choices you change are sent */
+const SYNC = { lr: "lr", rl: "rl", skip: "skip", trash: "trash" };      // action names sent to fm_sync_plan
+async function syncDlg() {
+  const c = FM.cmp;
+  if (!c || c.state !== "ready" || !c.complete || c.truncated) return toast("Sync needs a complete comparison. Compare again first.");
+  await cmpFlushTags();
+  const scope = c.selected ? "tags" : "differences", filter = scope === "tags" ? "tagged" : "differences";
+  const PAGE = 200, bin = binName(), over = new Map();
+  let total = 0, rows = [], page = 0, del = false, delSrc = "left", plan = null, tok = 0;
+  const deleteFrom = () => del ? (delSrc === "left" ? "right" : "left") : null;
+  const typeClash = x => x.left && x.right && x.left.k !== x.right.k;
+  const can = x => ({ lr: !!x.left && x._k !== "nc" && !typeClash(x), rl: !!x.right && x._k !== "nc" && !typeClash(x) });
+  const trashable = x => del && (deleteFrom() === "right" ? x._k === "onlyright" : x._k === "onlyleft");
+  const dflt = x => trashable(x) ? SYNC.trash : x._k === "onlyleft" || x._k === "newerleft" ? (can(x).lr ? SYNC.lr : SYNC.skip)
+    : x._k === "onlyright" || x._k === "newerright" ? (can(x).rl ? SYNC.rl : SYNC.skip) : SYNC.skip;   // mirrors the server's defaults
+  const act = x => over.get(x.id) ?? dflt(x);
+  const d = dlg("fm-wide fm-sync", `<h3>Sync folders</h3>
+    <div class="fm-cmp2"><span><b>Left:</b> <span class="mono">${esc(c.left)}</span></span><span><b>Right:</b> <span class="mono">${esc(c.right)}</span></span></div>
+    <p class="fm-note" id="fmSyScope"></p>
+    <div class="fm-mr fm-synct" id="fmSyT"><div class="loading" style="padding:12px">${SPIN}Loading…</div></div>
+    <div class="fm-pager" id="fmSyPg"></div>
+    <label class="fm-cl" style="margin-top:10px"><input type="checkbox" id="fmSyDel"> Delete items missing from <select id="fmSyDelS" aria-label="Which side to mirror"><option value="left">Left</option><option value="right">Right</option></select> on the other side</label>
+    <p class="fm-note" style="margin:2px 0 0 22px">Sends those items to the ${esc(bin)}. Never deletes for good.</p>
+    <p class="fm-sum num" id="fmSySum" aria-live="polite"></p>
+    <label class="fm-cl" id="fmSyConfL" hidden><input type="checkbox" id="fmSyConf"> <span id="fmSyConfT"></span></label>
+    <div class="fm-plan" id="fmPlan"></div>
+    <p class="form-error" id="fmErr" hidden role="alert"></p>
+    <div class="row-actions"><button class="btn" data-cancel>Cancel</button><button class="btn" id="fmSyDry">Dry run</button><span class="sp"></span><button class="btn primary" id="fmSyGo" disabled>Apply</button></div>`);
+  const tbl = $("#fmSyT"), planEl = $("#fmPlan"), errEl = $("#fmErr"), go = $("#fmSyGo");
+  const label = a => a === SYNC.lr ? "→ Copy left to right" : a === SYNC.rl ? "← Copy right to left" : a === SYNC.trash ? (deleteFrom() === "right" ? "Trash right" : "Trash left") : "— Skip";
+  const opts = x => trashable(x) ? [[SYNC.trash, true], [SYNC.skip, true]] : [[SYNC.lr, can(x).lr], [SYNC.rl, can(x).rl], [SYNC.skip, true]];
+  const draw = () => {
+    tbl.innerHTML = `<table><thead><tr><th scope="col">Path</th><th scope="col">Status</th><th scope="col">Action</th></tr></thead><tbody>${rows.map(x => {
+      const cur = act(x);
+      return `<tr><td class="mono">${esc(x.rel)}</td><td><span class="cs cs-${CMP[x._k][2]}">${CMP[x._k][0]} ${esc(cmpText(x))}</span>${typeClash(x) ? `<small>A file and a folder share this name. Skipped.</small>` : ""}</td>
+        <td><select data-id="${esc(String(x.id))}" aria-label="Action for ${esc(x.rel)}">${opts(x).map(([v, ok]) => `<option value="${v}" ${ok ? "" : "disabled"} ${v === cur ? "selected" : ""}>${esc(label(v))}</option>`).join("")}</select></td></tr>`;
+    }).join("")}</tbody></table>`;
+    const pages = Math.ceil(total / PAGE);
+    $("#fmSyPg").innerHTML = pages > 1 ? `<button class="btn" data-pg="-1" ${page ? "" : "disabled"}>Previous</button><span>${page * PAGE + 1}–${Math.min(total, page * PAGE + PAGE)} of ${total.toLocaleString()}</span><button class="btn" data-pg="1" ${page < pages - 1 ? "" : "disabled"}>Next</button>` : "";
+    $("#fmSyScope").textContent = `${scope === "tags" ? `Syncing the ${items(total)} you tagged.` : `Syncing all ${items(total)} that differ.`}${over.size ? ` ${plural(over.size, "choice")} changed from the defaults.` : ""} Review each direction before applying. Different files are skipped until you choose a direction.`;
+  };
+  const loadPage = async () => {
+    let r;
+    try { r = await api("fm_results", { result: c.result, offset: page * PAGE, limit: PAGE, filter }); } catch (e) { r = { error: e.message }; }
+    if (!d.open) return;
+    if (r.error) { tbl.innerHTML = ""; errEl.textContent = r.error; errEl.hidden = false; return; }
+    total = r.total; rows = (r.rows || []).map(cmpRow);
+    draw();
+  };
+  const ready = () => {
+    const tn = plan?.directions?.trash?.n || 0;
+    go.disabled = !plan || (plan.blocked.length > 0 && !$("#fmCont")?.checked) || (tn > 0 && !$("#fmSyConf").checked) || (!plan.items.length && !tn);
+  };
+  const stale = () => {
+    plan = null; tok++;
+    $("#fmSySum").textContent = ""; $("#fmSyConfL").hidden = true; $("#fmSyConf").checked = false;
+    planEl.innerHTML = `<p class="fm-note">Choices changed. Run Dry run to preview them.</p>`;
+    ready();
+  };
+  d.onclick = e => {
+    const b = e.target.closest("[data-pg]");
+    if (b) { page += +b.dataset.pg; loadPage(); }
+    if (e.target.closest("[data-retry]")) dry();
+  };
+  d.addEventListener("change", e => {
+    const s = e.target.closest("select[data-id]");
+    if (s) {
+      const x = rows.find(y => String(y.id) === s.dataset.id);
+      if (x) { if (s.value === dflt(x)) over.delete(x.id); else over.set(x.id, s.value); }
+      draw(); stale();
+    } else if (e.target.id === "fmSyDel" || e.target.id === "fmSyDelS") {
+      del = $("#fmSyDel").checked; delSrc = $("#fmSyDelS").value;
+      for (const [id, a] of [...over]) if (a === SYNC.trash) over.delete(id);       // trash choices belong to the old setting
+      draw(); stale();
+    } else if (e.target.id === "fmSyConf" || e.target.id === "fmCont") ready();
+  });
+  async function dry() {
+    const my = ++tok;
+    errEl.hidden = true; plan = null; ready();
+    planEl.innerHTML = `<div class="loading">${SPIN}Checking sync plan…</div>`;
+    let r;
+    try {
+      r = await api("fm_sync_plan", { comparison: c.result, scope, deleteFrom: deleteFrom(),
+                                      actions: [...over].map(([id, action]) => ({ id, action })), overrides: Object.fromEntries(over) });
+    } catch (e) { r = { error: e.message }; }
+    if (my !== tok || !d.open) return;
+    if (r.error === "There's nothing to sync.") { planEl.innerHTML = `<p><b>There's nothing to sync.</b> Every row is set to Skip.</p>`; return; }
+    if (r.error) { planEl.innerHTML = `<button class="btn" data-retry>Retry</button>`; errEl.textContent = r.error; errEl.hidden = false; return; }
+    r.items ||= []; r.blocked ||= []; r.conflicts ||= [];
+    const dir = r.directions || {}, lr = dir.lr || { n: 0, bytes: 0 }, rl = dir.rl || { n: 0, bytes: 0 }, tr = dir.trash || { n: 0, bytes: 0 };
+    plan = r;
+    $("#fmSySum").textContent = `→ ${items(lr.n)} · ${fmt(lr.bytes)}   ← ${items(rl.n)} · ${fmt(rl.bytes)}   Trash: ${items(tr.n)} · ${fmt(tr.bytes)}`;
+    $("#fmSyConfL").hidden = !tr.n;
+    $("#fmSyConfT").textContent = `Move ${items(tr.n)} to the ${bin}`;
+    planEl.innerHTML = `<h4 tabindex="-1" id="fmSyH">Dry-run preview: ${plural(lr.n + rl.n, "copy", "copies")}, ${plural(r.conflicts.length, "replacement")}, ${plural(tr.n, "removal")}</h4>
+      <p class="fm-note">${r.undoable === false ? "Some of these changes can't be undone." : "Undo covers these changes. Replaced and removed items go to the " + esc(bin) + "."}</p>
+      <details><summary>Every change (${items(r.items.length)})</summary>${listHTML(r.items, it => `<li><span class="p">${esc(it.dst || it.src || "")}</span><span class="z">${esc(it.action === "trash" ? "to the " + bin : it.replace ? "replace" : "copy")}${it.size != null ? " · " + fmt(it.size) : ""}</span></li>`)}</details>
+      ${r.conflicts.length ? `<details><summary>Replacements (${items(r.conflicts.length)})</summary>${listHTML(r.conflicts, x => `<li><span class="p">${esc(x.dst)}</span><span class="z">${x.srcSize != null ? fmt(x.srcSize) : "—"} replaces ${x.dstSize != null ? fmt(x.dstSize) : "—"}</span></li>`, 100)}</details>` : ""}
+      ${blockedHTML(r.blocked, r.items.length, "synced")}`;
+    $("#fmSyH")?.focus();
+    ready();
+  }
+  $("#fmSyDry").onclick = dry;
+  go.onclick = async () => {
+    if (!plan) return;
+    go.disabled = true;
+    let r;
+    try { r = await api("fm_start", { plan: plan.plan, exclude: plan.blocked.map(b => b.path), conflict: "replace", confirm: false }); } catch (e) { r = { error: e.message }; }
+    if (r.error) { errEl.textContent = r.error; errEl.hidden = false; plan = null; planEl.innerHTML = `<button class="btn" data-retry>Retry</button>`; return; }
+    d.close();
+    watchJob(r.job, { op: "sync" });
+    announce("Syncing folders.");
+  };
+  planEl.innerHTML = `<p class="fm-note">Run Dry run to see every change and the totals before applying.</p>`;
+  await loadPage();
+  d.querySelector("select[data-id]")?.focus();
+}
+
+/* ------------------------------------------------------------------ archives (Enter on .zip/.tar…, F5 extract, Alt+F9, Alt+F5) */
+const srcOf = (t, r) => t.kind === "archive" && t.arch ? { archive: t.arch.handle, member: r.member } : rowPath(t, r);
+async function openArchive(P, r) {
+  const t = realTab(P), path = rowPath(t, r);
+  if (FM.cmp) exitCompare(true);
+  if (FM.quick && FM.quick.P === P) closeQuick();
+  const ret = { path: t.path, cur: r.n, back: t.back.slice(), fwd: t.fwd.slice() };
+  t.scrollTop = P.el.scroll.scrollTop;
+  Object.assign(t, { kind: "archive", archive: path, arch: { name: r.n, ret, stack: [], handle: null, job: null, opening: true }, rows: [], view: [], sorted: [],
+                     cur: 0, error: null, loaded: false, loading: false });
+  t.filter.text = ""; t.filter.open = false;
+  P.el.scroll.scrollTop = 0;
+  renderPane(P);
+  let res;
+  try { res = await api("fm_archive_open", { path }); } catch (e) { res = { error: e.message }; }
+  if (t.arch?.ret !== ret) return;
+  if (res.error) return archFail(P, t, res.error);
+  t.arch.job = res.job;
+  watchJob(res.job, { op: "archive", onDone: j => {
+    if (t.kind !== "archive" || t.arch.job !== res.job) return;
+    t.arch.opening = false;
+    if (j.state === "cancelled") return archLeave(P, t);
+    if (j.state === "failed") return archFail(P, t, j.errors?.[0]?.message || j.summary || "");
+    t.arch.handle = j.result?.result;
+    if (!t.arch.handle) return archFail(P, t, "");
+    archList(P, t, {});
+  } }, () => { if (visible(P, t)) renderMsg(P); });
+}
+const archMsg = reason => /^(This archive|Hoard can|The archive)/.test(reason || "") ? reason : `Hoard can't read this archive.${reason ? " " + reason : ""}`;
+function openArchiveJob(path) {
+  return new Promise(async res => {
+    let r;
+    try { r = await api("fm_archive_open", { path }); } catch (e) { r = { error: e.message }; }
+    if (r.error) { toast(r.error, "error"); return res(null); }
+    watchJob(r.job, { op: "archive", onDone: j => {
+      if (j.state === "done" && j.result?.result) return res(j.result.result);
+      if (j.state === "failed") toast(archMsg(j.errors?.[0]?.message || j.summary || ""), "error");
+      res(null);
+    } });
+  });
+}
+function archFail(P, t, reason) {
+  t.arch.opening = false;
+  const msg = archMsg(reason);
+  Object.assign(t, { error: msg, rows: [], view: [], sorted: [], loaded: true });
+  if (visible(P, t)) renderPane(P);
+  alertEl.textContent = msg;
+}
+async function archList(P, t, o) {
+  const inner = t.arch.stack.at(-1)?.inner ?? "";
+  const my = ++t.tok;
+  t.loading = true; t.showLoading = true; t.error = null;
+  if (visible(P, t)) renderMsg(P);
+  const rows = [];
+  let total = Infinity, err = null;
+  try {
+    for (let off = 0; off < total && off < 200000; off += 500) {
+      const r = await api("fm_archive_list", { archive: t.arch.handle, inner, hidden: FM.hidden, sort: t.biggest ? "size" : t.sort, desc: t.biggest || t.desc, offset: off, limit: 500 });
+      if (r.error) { err = r.error; break; }
+      total = r.total ?? 0;
+      rows.push(...(r.rows || []));
+      if (!(r.rows || []).length) break;
+    }
+  } catch (e) { err = e.message; }
+  if (my !== t.tok || t.kind !== "archive") return;
+  t.loading = false; t.showLoading = false;
+  if (err) return archFail(P, t, err);
+  const shown = [t.arch.name, ...t.arch.stack.map(s => s.n)].join(" ▸ ");
+  for (const r of rows) r.path = `${t.archive}${FM.sep}${[...t.arch.stack.map(s => s.n), r.n].join("/")}`;
+  const keepTags = o.keep ? new Set(t.rows.filter(x => x._t).map(x => x.n)) : null;
+  t.rows = rows; t.loaded = true; t.label = shown;
+  for (const r of rows) if (keepTags?.has(r.n)) r._t = true;
+  if (!o.keep) { t.filter.text = ""; t.anchor = -1; }
+  sortRows(t); applyFilter(t, true);
+  placeCursor(t, o.focus ?? (o.keep ? t.curName : null), o.keep ? t.cur : 0);
+  if (visible(P, t)) { if (!o.keep) P.el.scroll.scrollTop = 0; renderPane(P); ensureVisible(P); renderRows(P); if (P === AP()) quickSoon(); }
+}
+function archInto(P, t, r) {
+  if (ARCH_RE.test(r.n) && !isDir(r)) return toast("Extract this archive before opening it.");
+  t.arch.stack.push({ n: r.n, inner: r.member });
+  archList(P, t, {});
+}
+function archUp(P, t) {
+  if (t.arch.stack.length) { const s = t.arch.stack.pop(); return archList(P, t, { focus: s.n }); }
+  archLeave(P, t);
+}
+function archLeave(P, t) {
+  const a = t.arch;
+  if (a?.opening && a.job) api("fm_control", { job: a.job, action: "cancel" }).catch(() => {});
+  Object.assign(t, { kind: "dir", arch: null, archive: null, error: null, back: a?.ret.back || t.back, fwd: a?.ret.fwd || t.fwd });
+  load(P, t, a?.ret.path || t.path, { focus: a?.ret.cur });
+}
+function archCrumb(P, t, i) {
+  if (i === t.arch.stack.length - 1) return;
+  t.arch.stack = t.arch.stack.slice(0, i + 1);
+  archList(P, t, {});
+}
+function renderArchNav(P, t) {
+  const a = t.arch, cr = P.el.crumbs;
+  P.el.up.disabled = false;
+  const parts = [`<button data-p="${esc(a.ret.path)}" title="${esc(a.ret.path)}">${esc(itemName(a.ret.path))}</button>`, `<span class="sep" aria-hidden="true">›</span>`,
+    `<button data-a="-1" class="${a.stack.length ? "" : "last"}" title="${esc(t.archive)}">${esc(a.name)}</button>`,
+    ...a.stack.map((s, i) => `<span class="sep" aria-hidden="true">▸</span><button data-a="${i}" class="${i === a.stack.length - 1 ? "last" : ""}">${esc(s.n)}</button>`)];
+  cr.innerHTML = parts.join("") + `<span class="fm-badge">Read-only archive</span>`;
+  cr.setAttribute("aria-label", `Archive ${a.name}${a.stack.length ? `, folder ${a.stack.at(-1).n}` : ""}.`);
+  P.el.star.disabled = true;
+  P.el.star.innerHTML = I.star;
+}
+function archiveMsg(P, t) {
+  if (t.arch?.opening) return { html: `<div><div class="loading">${SPIN}Reading archive…</div><button class="btn" data-m="archstop">Stop</button></div>` };
+  if (t.loading) return { html: `<div class="loading">${SPIN}Reading archive…</div>` };
+  if (t.error) return { err: true, html: `<div><b>${esc(t.error)}</b><div class="row-actions"><button class="btn" data-m="retry">Retry</button><button class="btn" data-m="up">Go back</button></div></div>` };
+  if (t.loaded && !t.view.length) return { html: t.filter.text && t.rows.length ? `<div><b>No matching items.</b><button class="btn" data-m="clear">Clear filter</button></div>` : `<div><b>This archive is empty.</b></div>` };
+  return { html: "" };
+}
+function otherRealFolder(P) {
+  const t = FM.cmp ? FM.cmp.tabs[1 - P.side] : tabOf(FM.panes[1 - P.side]);
+  return (t.kind === "dir" || t.kind === "cmp") && !t.error ? t.path : "";
+}
+/* the shared review for extract, pack and checksum files: fields, plan, conflicts, blocked, start */
+function reviewOp(o) {
+  const busy = FM.jobs.some(j => ACTIVE.has(j.state) && MUT(j.op));
+  const d = dlg("fm-op", `<h3>${esc(o.title)}</h3>${o.head || ""}${o.fields || ""}
+    <div class="fm-plan" id="fmPlan" aria-live="polite"><div class="loading">${SPIN}Checking…</div></div>
+    <p class="form-error" id="fmErr" hidden></p>
+    <div class="row-actions"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-primary disabled>${esc(busy ? "Add to queue" : o.now)}</button></div>`);
+  const btn = d.querySelector("[data-primary]"), planEl = $("#fmPlan"), errEl = $("#fmErr");
+  let plan = null, tok = 0, timer = 0, at = 0;
+  const bad = m => { plan = null; planEl.innerHTML = ""; errEl.textContent = m; errEl.hidden = false; btn.disabled = true; };
+  const ready = () => { btn.disabled = !plan || !plan.items.length || (plan.blocked.length > 0 && !$("#fmCont")?.checked); };
+  async function doPlan() {
+    const my = ++tok;
+    errEl.hidden = true; plan = null; btn.disabled = true;
+    const body = o.body();
+    if (typeof body === "string") return bad(body);
+    planEl.innerHTML = `<div class="loading">${SPIN}Checking…</div>`;
+    let r;
+    try { r = await api("fm_plan", body); } catch (e) { r = { error: e.message }; }
+    if (my !== tok || !d.open) return;
+    if (r.error) return bad(r.error);
+    plan = r; at = Date.now();
+    plan.items ||= []; plan.blocked ||= []; plan.conflicts ||= [];
+    const tot = plan.total || { n: plan.items.length, bytes: 0 };
+    planEl.innerHTML = (plan.items.length ? `<details><summary>${esc(o.will(plan.items.length))}${tot.bytes ? ` · ${fmt(tot.bytes)}` : ""}${plan.undoable === false ? " · can't be undone" : ""}</summary>
+        ${listHTML(plan.items, it => `<li><span class="p">${esc(it.dst || it.src || "")}</span>${it.size != null ? `<span class="z">${fmt(it.size)}</span>` : ""}</li>`)}</details>` : "")
+      + (plan.conflicts.length ? `<div class="fm-conf"><b>${plan.conflicts.length === 1 ? "1 item already exists" : `${plan.conflicts.length.toLocaleString()} items already exist`} in the destination</b>
+        ${listHTML(plan.conflicts, c => `<li><span class="p">${esc(c.dst)}</span></li>`, 50)}
+        <label class="fm-field" style="margin:0"><span>When a name is taken</span><select id="fmConf">
+          <option value="ask">Ask each time</option><option value="replace">Replace all</option><option value="skip">Skip all</option><option value="keep">Keep both</option>
+          <option value="newer">Replace if the source is newer</option><option value="larger">Replace if the source is larger</option><option value="differs">Replace if the size differs</option></select></label></div>` : "")
+      + blockedHTML(plan.blocked, plan.items.length, o.verbed);
+    const cont = $("#fmCont");
+    if (cont) cont.onchange = ready;
+    ready();
+  }
+  const replan = () => { clearTimeout(timer); btn.disabled = true; timer = setTimeout(doPlan, 300); };
+  d.querySelectorAll("[data-replan]").forEach(x => { x.oninput = replan; x.onchange = replan; });
+  doPlan();
+  btn.onclick = async () => {
+    if (!plan) return;
+    if (Date.now() - at > 9 * 60000) { await doPlan(); if (!plan) return; ready(); if (btn.disabled) return; }
+    btn.disabled = true;
+    let r;
+    try { r = await api("fm_start", { plan: plan.plan, exclude: plan.blocked.map(b => b.path), conflict: $("#fmConf")?.value || "ask", confirm: false }); } catch (e) { r = { error: e.message }; }
+    if (r.error) { errEl.textContent = r.error; errEl.hidden = false; plan = null; replan(); return; }
+    const n = plan.items.length;
+    d.close();
+    watchJob(r.job, { op: o.op, ...(o.meta || {}) });
+    announce(o.started(n));
+  };
+  d.querySelector("[data-replan]")?.focus();
+  return d;
+}
+async function extractDlg(all) {
+  const P = AP(), t = tabOf(P);
+  let archive, members, name, n;
+  if (t.kind === "archive") {
+    archive = t.arch.handle; name = t.arch.name;
+    const rows = all ? [] : sel(t);
+    if (!all && !rows.length) return;
+    members = rows.map(r => r.member); n = rows.length;
+  } else {
+    const r = curRow(t);
+    if (!r || isDir(r) || !ARCH_RE.test(r.n)) return toast("Put the cursor on a .zip or .tar archive first.");
+    announce("Reading archive…");
+    archive = await openArchiveJob(rowPath(t, r));
+    if (!archive) return;
+    name = r.n; members = []; all = true;
+  }
+  reviewOp({
+    title: all ? `Extract everything from ${name}` : `Extract ${items(n)}`, now: "Extract now", op: "extract", verbed: "extracted",
+    fields: `<label class="fm-field"><span>To</span><input type="text" id="fmTo" class="mono" data-replan value="${esc(otherRealFolder(P))}" spellcheck="false" autocomplete="off"></label>
+      <div class="fm-checks"><label><input type="checkbox" id="fmKeepT" data-replan checked> Preserve modified times</label></div>`,
+    body: () => { const dest = $("#fmTo").value.trim(); return !dest ? "Choose a folder to extract to." : { op: "extract", archive, members: all ? [""] : members, dest, options: { preserveTimes: $("#fmKeepT").checked } }; },
+    will: k => `Will extract ${items(k)}`, started: k => `Extracting ${items(k)}.`,
+  });
+}
+function packDlg() {
+  const P = AP(), t = tabOf(P), rows = sel(t);
+  if (!rows.length) return;
+  const srcs = rows.map(r => rowPath(t, r));
+  reviewOp({
+    title: "Create ZIP archive", now: "Create ZIP", op: "pack", verbed: "packed",
+    head: `<div class="dpath">${esc(rows.length === 1 ? srcs[0] : `${items(rows.length)} from ${t.path}`)}</div>`,
+    fields: `<label class="fm-field"><span>Name</span><input type="text" id="fmZN" data-replan value="Archive.zip" spellcheck="false" autocomplete="off"></label>
+      <label class="fm-field"><span>To</span><input type="text" id="fmTo" class="mono" data-replan value="${esc(otherRealFolder(P))}" spellcheck="false" autocomplete="off"></label>
+      <p class="fm-note">Folders keep their structure inside the archive. Links are never followed.</p>`,
+    body: () => {
+      let name = $("#fmZN").value.trim();
+      const dest = $("#fmTo").value.trim();
+      if (!name) return "Type a name for the archive.";
+      if (/[\\/]/.test(name) || (FM.ci && /[:*?"<>|]/.test(name))) return "A name can't contain \\ / : * ? \" < > or |.";
+      if (!/\.zip$/i.test(name)) name += ".zip";
+      return !dest ? "Choose where to save the archive." : { op: "pack", sources: srcs, dest, name };
+    },
+    will: k => `Will pack ${items(k)}`, started: k => `Creating a ZIP archive of ${items(k)}.`, meta: { P, t, sources: srcs },
+  });
+  setTimeout(() => { const i = $("#fmZN"); if (i) { i.focus(); i.setSelectionRange(0, i.value.length - 4); } }, 0);
+}
+/* members are read with fm_archive_read; media members play from a Blob, never from an extracted copy */
+async function memberBlob(src, size, kind, limit) {
+  if (size != null && size > limit) throw new Error(`This file is over ${fmt(limit)}. Extract it to preview it.`);
+  const parts = [];
+  let off = 0, total = size ?? Infinity;
+  while (off < total) {
+    const r = await readRange(src, off, 1048576);
+    parts.push(r.bytes); off += r.bytes.length; total = r.size;
+    if (off > limit) throw new Error(`This file is over ${fmt(limit)}. Extract it to preview it.`);
+    if (r.eof || !r.bytes.length) break;
+  }
+  const type = { img: "image/" + (/svg$/i.test(src.member || "") ? "svg+xml" : "png"), video: "video/mp4", audio: "audio/mpeg", pdf: "application/pdf" }[kind] || "";
+  return URL.createObjectURL(new Blob(parts, { type: kind === "img" ? "" : type }));
+}
+
+/* ------------------------------------------------------------------ checksums */
+const ALGOS = [["md5", "MD5", 32], ["sha1", "SHA-1", 40], ["sha256", "SHA-256", 64]];
+const algoName = a => ALGOS.find(x => x[0] === a)?.[1] || a;
+function ckKey(s) {
+  const k = String(s || "").toLowerCase().replace(/[^a-z]/g, "");
+  return k === "match" ? "match" : k === "mismatch" ? "mismatch" : k === "missing" ? "missing" : k === "unreadable" || k === "error" ? "error"
+    : k === "done" ? "done" : k === "excluded" ? "excl" : "";
+}
+const CK = { match: "✓ Match", mismatch: "≠ Mismatch", missing: "? Missing checksum", error: "! Couldn't read", done: "", excl: "Not checked.", "": "Not checked." };
+function checksumsDlg() {
+  const P = AP(), t = tabOf(P), rows = sel(t);
+  if (t.kind === "archive") return toast("Extract these files before checking them.");
+  const files = rows.filter(r => r.k === "f"), skipped = rows.filter(r => r.k !== "f");
+  if (!files.length) return toast("Choose at least one regular file.");
+  const paths = files.map(r => rowPath(t, r));
+  const S2 = { algo: FM.lastAlgo || "sha256", res: new Map(), job: null, picked: new Set() };
+  const ckExt = a => a === "md5" ? "md5" : a === "sha1" ? "sha1" : "sha256";
+  const near = t.rows.filter(r => /\.(md5|sha1|sha256)$/i.test(r.n) && r.k === "f").map(r => rowPath(t, r))
+    .sort((a, b) => (extOf(b) === ckExt(S2.algo)) - (extOf(a) === ckExt(S2.algo)));
+  const d = dlg("fm-wide fm-ck", `<div class="fm-ckhead"><h3 id="fmCkH" tabindex="-1">Checksums</h3>
+      <select id="fmCkA" aria-label="Algorithm">${ALGOS.map(([v, l]) => `<option value="${v}" ${v === S2.algo ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+    <div class="fm-vtools"><button class="btn primary" id="fmCkGo">Compute</button><button class="btn" id="fmCkV" aria-expanded="false">Verify…</button>
+      <button class="btn" id="fmCkStop" hidden>Stop</button><span class="fm-vstat" id="fmCkS" aria-live="polite"></span></div>
+    <div class="fm-verify" id="fmCkVf" hidden>
+      <div class="fm-checks" role="radiogroup" aria-label="Verify against"><label><input type="radio" name="fmCkW" value="file" checked> Checksum file</label><label><input type="radio" name="fmCkW" value="value"> Pasted value</label></div>
+      <label class="fm-field" id="fmCkFl"><span>Checksum file</span><input type="text" id="fmCkF" class="mono" list="fmCkFL" value="${esc(near[0] || join(dirName(paths[0]), "checksums." + ckExt(S2.algo)))}" spellcheck="false" autocomplete="off">
+        <datalist id="fmCkFL">${near.map(p => `<option value="${esc(p)}">`).join("")}</datalist></label>
+      <div id="fmCkPv" hidden><label class="fm-field"><span>Expected checksum</span><input type="text" id="fmCkX" class="mono" spellcheck="false" autocomplete="off"></label>
+        <label class="fm-field"><span>File</span><select id="fmCkXF">${paths.map((p, i) => `<option value="${i}">${esc(baseName(p))}</option>`).join("")}</select></label></div>
+      <div class="row-actions" style="margin-top:6px"><button class="btn" id="fmCkVc">Cancel</button><button class="btn primary" id="fmCkVg">Verify</button></div>
+    </div>
+    <div class="fm-mr" id="fmCkT"></div>
+    ${skipped.length ? `<p class="fm-note">${skipped.map(r => `${esc(baseName(r.n))}: ${r.k === "d" ? "folders aren't checked" : "links aren't followed"}`).join(" · ")}</p>` : ""}
+    <p class="form-error" id="fmErr" hidden role="alert"></p>
+    <div class="row-actions"><button class="btn" id="fmCkC">Copy</button><button class="btn" id="fmCkSv">Save checksum files…</button><span class="sp"></span><button class="btn" data-cancel>Close</button></div>`,
+    { onClose: () => { if (S2.job && S2.running) api("fm_control", { job: S2.job, action: "cancel" }).catch(() => {}); } });
+  const errEl = $("#fmErr"), stat = $("#fmCkS");
+  const draw = () => {
+    $("#fmCkT").innerHTML = `<table><thead><tr><th scope="col"><span class="sr">Pick</span></th><th scope="col">File</th><th scope="col">Checksum (${esc(algoName(S2.algo))})</th><th scope="col">Result</th></tr></thead><tbody>${paths.slice(0, 2000).map((p, i) => {
+      const r = S2.res.get(norm(p)), k = r ? ckKey(r.status) : "";
+      return `<tr class="${k === "mismatch" || k === "error" ? "bad" : ""}"><td><input type="checkbox" data-pick="${i}" ${S2.picked.has(i) ? "checked" : ""} aria-label="Pick ${esc(baseName(p))}" ${r?.digest ? "" : "disabled"}></td>
+        <td title="${esc(p)}">${esc(baseName(p))}</td><td class="mono" title="${esc(r?.digest || "")}">${r?.digest ? esc(r.digest) : ""}</td>
+        <td>${esc(r ? (k === "done" ? "" : CK[k]) : "Not checked.")}${r?.error ? `<small>${esc(r.error)}</small>` : ""}</td></tr>`;
+    }).join("")}</tbody></table>${paths.length > 2000 ? `<p class="fm-note">Showing the first 2,000 of ${paths.length.toLocaleString()} files.</p>` : ""}`;
+    $("#fmCkC").disabled = $("#fmCkSv").disabled = ![...S2.res.values()].some(r => r.digest);
+  };
+  const run = async body => {
+    errEl.hidden = true;
+    let r;
+    try { r = await api("fm_checksums", body); } catch (e) { r = { error: e.message }; }
+    if (r.error) { errEl.textContent = r.error; errEl.hidden = false; return; }
+    S2.job = r.job; S2.running = true; S2.res.clear(); S2.picked.clear(); S2.result = null; draw();
+    $("#fmCkGo").disabled = $("#fmCkVg").disabled = true; $("#fmCkStop").hidden = false;
+    stat.textContent = "Computing checksums…";
+    watchJob(r.job, { op: "checksums", onDone: async j => {
+      S2.running = false;
+      if (!d.open) return;
+      $("#fmCkGo").disabled = $("#fmCkVg").disabled = false; $("#fmCkStop").hidden = true;
+      if (j.state === "failed") { errEl.textContent = j.errors?.[0]?.message || j.summary || "The checksums couldn't be computed."; errEl.hidden = false; }
+      S2.result = j.result?.result || null;
+      if (S2.result) {
+        try { const got = await fetchResults(S2.result); for (const x of got.rows) S2.res.set(norm(x.path), x); } catch (e) { errEl.textContent = e.message; errEl.hidden = false; }
+      }
+      if (!d.open) return;
+      draw();
+      const n = [...S2.res.values()].filter(x => x.digest || ckKey(x.status) === "error").length;
+      const bad = [...S2.res.values()].filter(x => ["mismatch", "error", "missing"].includes(ckKey(x.status))).length;
+      stat.textContent = j.state === "cancelled" ? `Stopped. ${plural(n, "file")} checked.` : `${plural(n, "file")} checked${bad ? `; ${plural(bad, "problem")}` : ""}.`;
+      announce(stat.textContent);
+      $("#fmCkH").focus();
+    } }, j => { if (d.open) stat.textContent = `Computing checksums… ${(j.done?.n || 0).toLocaleString()} of ${paths.length.toLocaleString()}`; });
+  };
+  $("#fmCkA").onchange = e => { S2.algo = FM.lastAlgo = e.target.value; S2.res.clear(); S2.result = null; draw(); stat.textContent = ""; };
+  $("#fmCkGo").onclick = () => run({ paths, algorithm: S2.algo });
+  $("#fmCkStop").onclick = () => { if (S2.job) control(S2.job, "cancel"); };
+  $("#fmCkV").onclick = () => { const v = $("#fmCkVf"); v.hidden = !v.hidden; $("#fmCkV").setAttribute("aria-expanded", String(!v.hidden)); if (!v.hidden) d.querySelector("[name=fmCkW]:checked").focus(); };
+  $("#fmCkVc").onclick = () => { $("#fmCkVf").hidden = true; $("#fmCkV").setAttribute("aria-expanded", "false"); $("#fmCkV").focus(); };
+  d.addEventListener("change", e => {
+    if (e.target.name === "fmCkW") { const v = e.target.value === "value"; $("#fmCkFl").hidden = v; $("#fmCkPv").hidden = !v; }
+    const pk = e.target.closest?.("[data-pick]");
+    if (pk) { pk.checked ? S2.picked.add(+pk.dataset.pick) : S2.picked.delete(+pk.dataset.pick); }
+  });
+  $("#fmCkVg").onclick = () => {
+    if (d.querySelector("[name=fmCkW]:checked").value === "file") {
+      const f = $("#fmCkF").value.trim();
+      if (!f) { errEl.textContent = "Choose a checksum file."; errEl.hidden = false; return; }
+      return run({ paths, algorithm: S2.algo, expected: { file: f } });
+    }
+    const v = $("#fmCkX").value.trim().replace(/\s+/g, "").toLowerCase(), len = ALGOS.find(x => x[0] === S2.algo)[2];
+    if (!new RegExp(`^[0-9a-f]{${len}}$`).test(v)) { errEl.textContent = `That checksum isn't valid for ${algoName(S2.algo)}.`; errEl.hidden = false; $("#fmCkX").setAttribute("aria-invalid", "true"); return; }
+    const p = paths[+$("#fmCkXF").value];
+    run({ paths: [p], algorithm: S2.algo, expected: { value: v, path: p } });
+  };
+  $("#fmCkC").onclick = async () => {
+    const all = paths.map((p, i) => [i, S2.res.get(norm(p))]).filter(([, r]) => r?.digest);
+    const pick = S2.picked.size ? all.filter(([i]) => S2.picked.has(i)) : all;
+    const ok = await copyText(pick.map(([, r]) => `${r.digest}  ${baseName(r.path)}`).join("\n") + "\n");
+    stat.textContent = ok ? `Copied ${plural(pick.length, "checksum")}.` : "Couldn't copy.";
+  };
+  $("#fmCkSv").onclick = () => {
+    if (!S2.result) return;
+    const result = S2.result, algorithm = S2.algo;
+    reviewOp({ title: "Save checksum files", now: "Save", op: "checksum_save", verbed: "saved",
+      head: `<p>Saves one checksums.${ckExt(algorithm)} file in each folder, listing the files in that folder.</p>`,
+      body: () => ({ op: "checksum_save", result, algorithm }), will: k => `Will write ${plural(k, "file")}`, started: k => `Saving ${plural(k, "checksum file")}.` });
+  };
+  draw();
+  $("#fmCkGo").focus();
+}
+
+/* ------------------------------------------------------------------ editor (F4; Shift+F4 makes a new file first) */
+const ED_MAX = 5 * 1048576;
+let E = null;
+function normEnc(x) {
+  const s = String(x || "utf-8").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (s.startsWith("utf16be")) return "utf-16be";
+  if (s.startsWith("utf16")) return "utf-16le";
+  if (s.includes("latin") || s.includes("8859") || s === "l1") return "latin-1";
+  return "utf-8";
+}
+const encLabel = (e, bom) => e === "utf-8" ? (bom ? "UTF-8 BOM" : "UTF-8") : e === "utf-16le" ? "UTF-16 LE" : e === "utf-16be" ? "UTF-16 BE" : "Latin-1 (fallback)";
+function toB64(bytes) { let s = ""; for (let k = 0; k < bytes.length; k += 8192) s += String.fromCharCode.apply(null, bytes.subarray(k, k + 8192)); return btoa(s); }
+function splitEnds(s) {
+  const lines = [], ends = [], re = /\r\n|\r|\n/g;
+  let i = 0, m;
+  while ((m = re.exec(s))) { lines.push(s.slice(i, m.index)); ends.push(m[0]); i = re.lastIndex; }
+  lines.push(s.slice(i)); ends.push("");
+  return { lines, ends };
+}
+const endName = e => e === "\r\n" ? "CRLF" : e === "\r" ? "CR" : "LF";
+function viewerFor(path, hex, note) {
+  const t = AT();
+  const r = t.rows.find(x => sameP(rowPath(t, x), path)) || { n: baseName(path), k: "f", s: null, m: 0, c: 8, path };
+  openViewer(!!hex, r);
+  if (note) { toast(note); announce(note); }
+}
+async function openEditor(path) {
+  toast("Opening editor…");
+  let r;
+  try { r = await api("fm_edit_open", { path }); } catch (e) { r = { error: e.message }; }
+  if (r.error) return toast(r.error, "error");
+  if (r.tooLarge) return viewerFor(path, false, "This file is over 5 MB. Opened in the viewer.");
+  if (r.binary) {
+    const d = dlg("", `<h3>This looks like a binary file.</h3><div class="dpath">${esc(path)}</div><p>Editing it as text could damage it.</p>
+      <div class="row-actions"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-primary>Open hex view</button></div>`);
+    d.querySelector("[data-primary]").onclick = () => { d.close(); setTimeout(() => viewerFor(path, true), 0); };
+    return;
+  }
+  if (r.writable === false) { toast(r.reason || "This file can't be changed.", "error"); return viewerFor(path, false, r.reason || "Read-only."); }
+  const enc = normEnc(r.encoding), bom = !!r.bom;
+  const text = new TextDecoder("utf-8").decode(b64(r.data)).replace(/^\uFEFF/, ""), { lines, ends } = splitEnds(text);
+  const counts = {};
+  for (const e of ends) if (e) counts[e] = (counts[e] || 0) + 1;
+  const kinds = Object.keys(counts);
+  const MAIN = { crlf: "\r\n", lf: "\n", cr: "\r" };
+  const pred = MAIN[r.endings?.main] || kinds.sort((a, b) => counts[b] - counts[a])[0] || (S.os === "windows" ? "\r\n" : "\n");
+  const value = lines.join("\n");
+  E = { path, name: baseName(path), version: r.version, encRaw: r.encoding || "utf-8", enc, bom, pred, mixed: r.endings ? !!r.endings.mixed : kinds.length > 1,
+        ends: ends.slice(), prev: value, snaps: [], saved: value, saving: false, ver: 0, rx: null };
+  editorUI(value);
+}
+function editorUI(value) {
+  const d = dlg("fm-viewer fm-editor", `<div class="fm-vhead"><div class="fm-edt"><h3 id="fmEdT"></h3><button class="btn" id="fmEdX">Close</button></div><div class="fm-vpath">${esc(E.path)}</div></div>
+    <div class="fm-vtools"><button class="btn primary" id="fmEdS" title="Save (Ctrl+S)">Save</button><button class="btn" id="fmEdF" title="Search (Ctrl+F)">Search</button>
+      <button class="btn" id="fmEdR" title="Replace (Ctrl+H)">Replace</button><button class="btn" id="fmEdG" title="Go to line (Ctrl+G)">Go to</button>
+      <span class="fm-vgo" id="fmEdGo" hidden><input type="text" id="fmEdGoIn" inputmode="numeric" placeholder="Line" aria-label="Go to line number"> <button class="btn" id="fmEdGoOk">Go</button></span>
+      <label class="fm-cl"><input type="checkbox" id="fmEdW"> Wrap</label><span class="fm-vstat" id="fmEdMsg" aria-live="polite"></span></div>
+    <div class="fm-edsearch" id="fmEdSB" hidden>
+      <input type="search" id="fmEdQ" placeholder="Find" aria-label="Find"><input type="text" id="fmEdRp" placeholder="Replace with" aria-label="Replace with" hidden>
+      <label class="fm-cl"><input type="checkbox" id="fmEdRx"> Regex</label><label class="fm-cl"><input type="checkbox" id="fmEdCs"> Match case</label>
+      <button class="btn" id="fmEdPv" title="Previous (Shift+F3)">Previous</button><button class="btn" id="fmEdNx" title="Next (F3)">Next</button>
+      <button class="btn" id="fmEdR1" hidden>Replace</button><button class="btn" id="fmEdRA" hidden>Replace all</button><span class="fm-vstat" id="fmEdCnt" aria-live="polite"></span></div>
+    <div class="fm-edbody"><pre class="fm-gut" id="fmEdGut" aria-hidden="true"></pre><textarea id="fmEdTA" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-label="Contents of ${esc(E.name)}"></textarea>
+      <div class="fm-inner" id="fmEdIn" hidden role="alertdialog" aria-modal="true" aria-labelledby="fmEdInT"></div></div>
+    <div class="fm-edstat" id="fmEdSt"></div>`, { onClose: () => { E = null; } });
+  const ta = $("#fmEdTA"), gut = $("#fmEdGut");
+  ta.value = value;
+  let raf = 0, lastLines = -1;
+  const status = () => {
+    raf = 0;
+    if (!E) return;
+    const v = ta.value, pos = ta.selectionStart;
+    const before = v.slice(0, pos), line = (before.match(/\n/g) || []).length + 1, col = pos - before.lastIndexOf("\n");
+    const dirty = v !== E.saved;
+    $("#fmEdT").textContent = `Edit · ${E.name}${dirty ? " *" : ""}`;
+    $("#fmEdSt").textContent = `${encLabel(E.enc, E.bom)} · ${E.mixed ? `Mixed line endings (new lines use ${endName(E.pred)})` : endName(E.pred)} · Line ${line}, column ${col} · ${E.saving ? "Saving…" : dirty ? "Modified" : E.justSaved ? "Saved." : "Unchanged"}`;
+    const n = (v.match(/\n/g) || []).length + 1;
+    if (n !== lastLines) { lastLines = n; let s = ""; for (let k = 1; k <= n; k++) s += k + "\n"; gut.textContent = s; }
+    gut.scrollTop = ta.scrollTop;
+  };
+  const soon = () => { if (!raf) raf = requestAnimationFrame(status); };
+  E.status = soon;
+  ta.addEventListener("input", () => { edTrack(ta.value); E.ver++; E.rx = null; E.justSaved = false; soon(); });
+  ["keyup", "click", "select"].forEach(ev => ta.addEventListener(ev, soon));
+  ta.addEventListener("scroll", () => { gut.scrollTop = ta.scrollTop; });
+  $("#fmEdW").onchange = e => { ta.wrap = e.target.checked ? "soft" : "off"; ta.classList.toggle("wrap", e.target.checked); gut.hidden = e.target.checked; };
+  $("#fmEdX").onclick = edClose;
+  $("#fmEdS").onclick = edSave;
+  $("#fmEdF").onclick = () => edFind(false);
+  $("#fmEdR").onclick = () => edFind(true);
+  $("#fmEdG").onclick = () => { $("#fmEdGo").hidden = false; $("#fmEdGoIn").focus(); };
+  $("#fmEdGoOk").onclick = edGoto;
+  $("#fmEdGoIn").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); edGoto(); } else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); $("#fmEdGo").hidden = true; ta.focus(); } });
+  $("#fmEdQ").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); edNext(e.shiftKey); } else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); $("#fmEdSB").hidden = true; ta.focus(); } });
+  $("#fmEdRp").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); edReplace(); } else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); $("#fmEdSB").hidden = true; ta.focus(); } });
+  ["fmEdQ", "fmEdRx", "fmEdCs"].forEach(id => $("#" + id).addEventListener("input", () => { E.rx = null; $("#fmEdCnt").textContent = ""; }));
+  $("#fmEdNx").onclick = () => edNext(false);
+  $("#fmEdPv").onclick = () => edNext(true);
+  $("#fmEdR1").onclick = edReplace;
+  $("#fmEdRA").onclick = edReplaceAll;
+  const baseKey = d.onkeydown;
+  d.onkeydown = e => {
+    if (!E) return;
+    const k = combo(e);
+    if (!$("#fmEdIn").hidden) { if (k === "Escape") { e.preventDefault(); E.answer?.("cancel"); } return; }
+    if (k === "Escape" || k === "F10") { e.preventDefault(); return edClose(); }
+    if (k === "Ctrl+S") { e.preventDefault(); return edSave(); }
+    if (k === "Ctrl+F") { e.preventDefault(); return edFind(false); }
+    if (k === "Ctrl+H") { e.preventDefault(); return edFind(true); }
+    if (k === "Ctrl+G") { e.preventDefault(); $("#fmEdGo").hidden = false; $("#fmEdGoIn").focus(); return; }
+    if (k === "F3" || k === "Shift+F3") { e.preventDefault(); return edNext(k !== "F3"); }
+    if (e.target === ta) return;                    // the textarea keeps Enter, Tab, Ctrl+Z/Y, Ctrl+X…
+    baseKey?.(e);
+  };
+  d.addEventListener("cancel", e => { if (E) { e.preventDefault(); edClose(); } });
+  status();
+  ta.focus();
+  ta.setSelectionRange(0, 0);
+  announce(`Editing ${E.name}.`);
+}
+function edAsk(title, body, buttons) {
+  return new Promise(res => {
+    const box = $("#fmEdIn");
+    box.innerHTML = `<div class="box"><h4 id="fmEdInT">${esc(title)}</h4>${body ? `<p>${esc(body)}</p>` : ""}<div class="row-actions">${buttons.map(([v, l, cls]) => `<button class="btn ${cls || ""}" data-v="${v}">${esc(l)}</button>`).join("")}</div></div>`;
+    box.hidden = false;
+    const done = v => { box.hidden = true; box.innerHTML = ""; E && (E.answer = null); res(v); $("#fmEdTA")?.focus(); };
+    if (E) E.answer = done;
+    box.querySelectorAll("[data-v]").forEach(b => b.onclick = () => done(b.dataset.v));
+    (box.querySelector(".primary") || box.querySelector("button")).focus();
+  });
+}
+async function edClose() {
+  if (!E) return;
+  const dirty = $("#fmEdTA").value !== E.saved;
+  if (dirty) {
+    const a = await edAsk(`Save changes to ${E.name}?`, "", [["cancel", "Cancel"], ["discard", "Discard", "danger"], ["save", "Save", "primary"]]);
+    if (a === "cancel") return;
+    if (a === "save") { E.closeAfter = true; return edSave(); }
+  }
+  $("#dlg").close();
+}
+/* each line keeps its own ending: E.ends[i] follows line i. On every edit the changed span is found by common prefix and
+   suffix, endings outside it stay with their lines, the span's last line keeps the ending it had, and new line breaks get
+   the file's main ending. Undo and redo restore the endings that went with that exact earlier text. */
+function edTrack(next) {
+  const prev = E.prev;
+  if (prev === next) return;
+  const old = E.ends;
+  E.snaps.push({ v: prev, e: old.slice() });
+  let budget = 0;
+  for (let i = E.snaps.length - 1; i >= 0; i--) { budget += E.snaps[i].v.length; if (budget > 24e6 || E.snaps.length - i > 200) { E.snaps.splice(0, i + 1); break; } }
+  E.prev = next;
+  for (let i = E.snaps.length - 2; i >= 0; i--) {
+    const sn = E.snaps[i];
+    if (sn.v.length === next.length && sn.v === next) { E.ends = sn.e.slice(); return; }
+  }
+  const max = Math.min(prev.length, next.length);
+  let cp = 0;
+  while (cp < max && prev.charCodeAt(cp) === next.charCodeAt(cp)) cp++;
+  let cs = 0;
+  while (cs < max - cp && prev.charCodeAt(prev.length - 1 - cs) === next.charCodeAt(next.length - 1 - cs)) cs++;
+  const nl = (str, a, b) => { let n = 0; for (let i = str.indexOf("\n", a); i >= 0 && i < b; i = str.indexOf("\n", i + 1)) n++; return n; };
+  const line = nl(prev, 0, cp), nlOld = nl(prev, cp, prev.length - cs), nlNew = nl(next, cp, next.length - cs);
+  const mid = [];
+  for (let k = 0; k < nlNew; k++) mid.push(k < nlOld ? old[line + k] : E.pred);
+  mid.push(old[line + nlOld] ?? "");
+  const ends = old.slice(0, line).concat(mid, old.slice(line + nlOld + 1));
+  for (let i = 0; i < ends.length - 1; i++) if (!ends[i]) ends[i] = E.pred;   // a line that was last now ends with a break
+  ends[ends.length - 1] = "";
+  E.ends = ends;
+}
+function edRebuild(v) {
+  const lines = v.split("\n");
+  if (E.ends.length !== lines.length) edTrack(v);                 // never trust a stale map
+  let out = "";
+  for (let i = 0; i < lines.length; i++) out += lines[i] + (i < lines.length - 1 ? (E.ends[i] || E.pred) : "");
+  return out;
+}
+async function edSave(force) {
+  if (!E || E.saving) return;
+  const ta = $("#fmEdTA"), snap = ta.value;
+  let enc = E.enc, bom = E.bom, encRaw = E.encRaw;
+  if (force === "utf8") { enc = "utf-8"; bom = false; encRaw = "utf-8"; }
+  else if (enc === "latin-1" && /[^\u0000-\u00ff]/.test(snap)) {
+    const a = await edAsk("Some characters can't be saved as Latin-1.", "Save the file as UTF-8 instead?", [["cancel", "Cancel"], ["utf8", "Save as UTF-8", "primary"]]);
+    if (a !== "utf8" || !E) { if (E) E.closeAfter = false; return; }
+    enc = "utf-8"; bom = false; encRaw = "utf-8";
+  }
+  const bytes = new TextEncoder().encode(edRebuild(snap));
+  E.saving = true; E.status();
+  ta.readOnly = true;                               // nothing typed during the save can be lost
+  $("#fmEdMsg").textContent = "Saving…";
+  const msg = $("#fmEdMsg"), fail = async m => {
+    if (!E) return;
+    E.saving = false; E.closeAfter = false; E.status();
+    const t2 = $("#fmEdTA"); if (t2) t2.readOnly = false;
+    if (/changed/i.test(m)) return edChanged();
+    msg.textContent = m; alertEl.textContent = m;
+  };
+  let pl;
+  try { pl = await api("fm_plan", { op: "edit_save", sources: [E.path], version: E.version, data: toB64(bytes), encoding: encRaw, bom }); } catch (e) { pl = { error: e.message }; }
+  if (!E) return;
+  if (pl.code === "needs_utf8") {
+    E.saving = false; E.status(); ta.readOnly = false;
+    const a = await edAsk("Some characters can't be saved as Latin-1.", "Save the file as UTF-8 instead?", [["cancel", "Cancel"], ["utf8", "Save as UTF-8", "primary"]]);
+    if (a === "utf8" && E) return edSave("utf8");
+    if (E) E.closeAfter = false;
+    return;
+  }
+  if (pl.error) return fail(pl.error);
+  if (pl.blocked?.length) return fail(pl.blocked[0].reason);
+  let st;
+  try { st = await api("fm_start", { plan: pl.plan, exclude: [], conflict: "replace", confirm: false }); } catch (e) { st = { error: e.message }; }
+  if (st.error) return fail(st.error);
+  msg.textContent = "Saving…";
+  const path = E.path;
+  watchJob(st.job, { op: "edit_save", onDone: async j => {
+    if (!E || E.path !== path) return;
+    const committed = j.state === "done" && j.counts && j.counts.failed === 0 && j.counts.done === 1;
+    if (!committed) return fail(j.state === "cancelled" ? "Saving was cancelled. Your changes are still here."
+      : `The file wasn't saved. ${j.errors?.[0] ? errLine(j.errors[0]) : j.summary || ""} Your changes are still here.`.trim());
+    E.saving = false; E.enc = enc; E.bom = bom; E.encRaw = encRaw; E.saved = snap; E.justSaved = true;
+    $("#fmEdTA").readOnly = false;
+    if (j.result?.version) E.version = j.result.version;
+    else { try { const r = await api("fm_edit_open", { path }); if (!r.error && E) E.version = r.version; } catch { /* the next save reports it */ } }
+    if (!E) return;
+    msg.textContent = "Saved."; announce("Saved."); E.status();
+    if (E.closeAfter) { E.closeAfter = false; if ($("#fmEdTA").value === E.saved) $("#dlg").close(); else edClose(); }
+  } });
+}
+async function edChanged() {
+  if (!E || E.asking) return;
+  E.asking = true;
+  const a = await edAsk("This file changed on disk.", "Someone or something else saved it after you opened it.", [["keep", "Keep editing"], ["reload", "Reload", "primary"]]);
+  E.asking = false;
+  if (a !== "reload" || !E) { if (E) E.ignoreVersion = true; return; }
+  if ($("#fmEdTA").value !== E.saved) {
+    const b = await edAsk("Discard your changes and reload?", "", [["cancel", "Cancel"], ["discard", "Discard and reload", "danger"]]);
+    if (b !== "discard") return;
+  }
+  const p = E.path;
+  $("#dlg").close();
+  setTimeout(() => openEditor(p), 0);
+}
+function edGoto() {
+  const ta = $("#fmEdTA"), n = parseInt($("#fmEdGoIn").value, 10);
+  if (!(n >= 1)) return ($("#fmEdMsg").textContent = "Type a line number.");
+  let off = 0, line = 1;
+  const v = ta.value;
+  while (line < n) { const i = v.indexOf("\n", off); if (i < 0) break; off = i + 1; line++; }
+  $("#fmEdGo").hidden = true;
+  ta.focus(); ta.setSelectionRange(off, off);
+  edScrollTo(off);
+  E.status();
+}
+function edScrollTo(i) {
+  const ta = $("#fmEdTA"), lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+  const line = (ta.value.slice(0, i).match(/\n/g) || []).length;
+  ta.scrollTop = Math.max(0, line * lh - ta.clientHeight / 2);
+}
+function edFind(replace) {
+  $("#fmEdSB").hidden = false;
+  $("#fmEdRp").hidden = $("#fmEdR1").hidden = $("#fmEdRA").hidden = !replace;
+  const ta = $("#fmEdTA"), q = $("#fmEdQ");
+  if (ta.selectionEnd > ta.selectionStart && ta.selectionEnd - ta.selectionStart < 200 && !ta.value.slice(ta.selectionStart, ta.selectionEnd).includes("\n")) q.value = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+  (replace && q.value ? $("#fmEdRp") : q).focus();
+  q.select();
+}
+const RX_WORKER = `onmessage = e => { const { src, flags, text, max } = e.data; try { const re = new RegExp(src, flags); const out = []; let m;
+  while ((m = re.exec(text)) && out.length < max * 2) { out.push(m.index, m[0].length); if (!m[0].length) re.lastIndex++; } postMessage({ ok: out }); } catch (err) { postMessage({ bad: String(err.message) }); } };`;
+function rxRun(src, flags, text) {
+  return new Promise(res => {
+    let w;
+    try { w = new Worker(URL.createObjectURL(new Blob([RX_WORKER], { type: "text/javascript" }))); } catch { return res({ bad: "worker" }); }
+    const timer = setTimeout(() => { w.terminate(); res({ timeout: true }); }, 1500);
+    w.onmessage = e => { clearTimeout(timer); w.terminate(); res(e.data); };
+    w.onerror = () => { clearTimeout(timer); w.terminate(); res({ bad: "error" }); };
+    w.postMessage({ src, flags, text, max: 200000 });
+  });
+}
+/* every match as [start, length] pairs: literal on this thread, regex in a worker that is stopped after 1.5 s */
+async function edMatches() {
+  const q = $("#fmEdQ").value, re = $("#fmEdRx").checked, cs = $("#fmEdCs").checked, v = $("#fmEdTA").value, cnt = $("#fmEdCnt");
+  if (!q) { $("#fmEdQ").focus(); return null; }
+  const key = `${E.ver}|${re}|${cs}|${q}`;
+  if (E.rx?.key === key) return E.rx.m;
+  let m = [];
+  if (!re) {
+    const hay = cs ? v : v.toLowerCase(), nd = cs ? q : q.toLowerCase();
+    for (let i = hay.indexOf(nd); i >= 0 && m.length < 400000; i = hay.indexOf(nd, i + Math.max(1, nd.length))) m.push(i, nd.length);
+  } else {
+    try { new RegExp(q, cs ? "g" : "gi"); } catch { cnt.textContent = "That regex isn't valid."; alertEl.textContent = cnt.textContent; return null; }
+    cnt.textContent = "Searching…";
+    const r = await rxRun(q, cs ? "g" : "gi", v);
+    if (r.timeout) { cnt.textContent = "That search took too long. Try a simpler pattern."; alertEl.textContent = cnt.textContent; return null; }
+    if (r.bad) { cnt.textContent = "That regex isn't valid."; return null; }
+    m = r.ok;
+  }
+  E.rx = { key, m };
+  return m;
+}
+async function edNext(back) {
+  if (!E) return;
+  if ($("#fmEdSB").hidden) return edFind(false);
+  const m = await edMatches(), cnt = $("#fmEdCnt"), ta = $("#fmEdTA");
+  if (!m) return;
+  const n = m.length / 2;
+  if (!n) { cnt.textContent = "No matches."; return; }
+  let k = -1;
+  if (!back) { for (let i = 0; i < n; i++) if (m[2 * i] >= ta.selectionEnd || (m[2 * i] >= ta.selectionStart && ta.selectionStart === ta.selectionEnd)) { k = i; break; } if (k < 0) k = 0; }
+  else { for (let i = n - 1; i >= 0; i--) if (m[2 * i] < ta.selectionStart) { k = i; break; } if (k < 0) k = n - 1; }
+  ta.setSelectionRange(m[2 * k], m[2 * k] + m[2 * k + 1]);
+  edScrollTo(m[2 * k]);
+  cnt.textContent = `${(k + 1).toLocaleString()} of ${n.toLocaleString()}`;
+  E.status();
+}
+function edInsert(a, b, text) {
+  const ta = $("#fmEdTA");
+  ta.focus();
+  ta.setSelectionRange(a, b);
+  if (!document.execCommand("insertText", false, text)) ta.setRangeText(text, a, b, "end");   // keeps Ctrl+Z working where supported
+  ta.dispatchEvent(new Event("input"));
+}
+async function edReplace() {
+  const m = await edMatches(), ta = $("#fmEdTA");
+  if (!m) return;
+  const a = ta.selectionStart, b = ta.selectionEnd;
+  let hit = false;
+  for (let i = 0; i < m.length; i += 2) if (m[i] === a && m[i] + m[i + 1] === b) { hit = true; break; }
+  if (hit) { edInsert(a, b, $("#fmEdRp").value); $("#fmEdRp").focus(); }
+  await edNext(false);
+  $("#fmEdRp").focus();
+}
+async function edReplaceAll() {
+  const m = await edMatches(), ta = $("#fmEdTA"), rep = $("#fmEdRp").value, cnt = $("#fmEdCnt");
+  if (!m) return;
+  const n = m.length / 2;
+  if (!n) { cnt.textContent = "No matches."; return; }
+  const v = ta.value;
+  let out = "", at = 0;
+  for (let i = 0; i < m.length; i += 2) { out += v.slice(at, m[i]) + rep; at = m[i] + m[i + 1]; }
+  out += v.slice(at);
+  edInsert(0, v.length, out);
+  ta.setSelectionRange(0, 0);
+  cnt.textContent = `Replaced ${plural(n, "match", "matches")}.`;
+  announce(cnt.textContent);
+}
+addEventListener("focus", async () => {
+  if (!E || E.saving || E.asking || E.ignoreVersion) return;
+  try {
+    const r = await api("fm_edit_open", { path: E.path });
+    if (E && !r.error && r.version != null && JSON.stringify(r.version) !== JSON.stringify(E.version) && !E.saving) edChanged();
+  } catch { /* checked again on save */ }
+});
+function editCmd() {
+  const P = AP(), t = tabOf(P), r = curRow(t);
+  if (!r || r._missing) return;
+  if (isDir(r)) return toast("Put the cursor on a file to edit it.");
+  if (r.p) return viewerFor(rowPath(t, r), false, r.p);
+  openEditor(rowPath(t, r));
+}
+
+/* ------------------------------------------------------------------ wiring round two into the commands */
+function extendCommands() {
+  const wrap = (id, f) => { const c = CMD[id]; if (!c) return; const old = c.why; c.why = () => f() || old?.() || ""; };
+  ["move", "rename", "mkdir", "mkfile", "trash", "delete", "mrename", "copyas", "stage"].forEach(id => wrap(id, roWhy));
+  wrap("filter", () => FM.cmp ? "Close comparison to filter." : "");
+  wrap("branch", () => FM.cmp ? RO_CMP.replace("change these files", "use branch view") : AT().kind === "archive" ? "Archives can't be shown as a branch." : "");
+  ["sortname", "sortsize", "sortmod", "sorttype", "biggest"].forEach(id => wrap(id, () => FM.cmp ? "Comparison rows keep their shared order." : ""));
+  CMD.copy.fn = () => AT().kind === "archive" ? extractDlg(false) : FM.cmp ? cmpCopy() : copyMove("copy");
+  CMD.copy.label = "Copy to the other pane (Extract in archives)";
+  CMD.refresh.fn = () => { if (FM.cmp) return cmpAgain(); refresh(AP()); announce("Refreshed."); };
+  def("edit", "Edit file", "F4", editCmd, { group: "Files", why: () => roWhy() || need.file(), tip: "Edit this file" });
+  def("newedit", "New file, then edit it", "Shift+F4", () => newItem("file", { edit: true }), { group: "Files", why: () => roWhy() || need.dir() });
+  def("compare", "Compare folders", "Ctrl+X D", compareDlg, { group: "Compare and sync" });
+  def("cmpagain", "Compare again", "Ctrl+R", cmpAgain, { group: "Compare and sync", why: () => FM.cmp ? "" : "Compare two folders first (Ctrl+X, D)." });
+  def("cmpclose", "Close comparison", "", () => exitCompare(), { group: "Compare and sync", why: () => FM.cmp ? "" : "No comparison is open." });
+  def("cmpsel", "Select differences", "", selectDifferences, { group: "Compare and sync", why: () => FM.cmp ? "" : "Compare two folders first (Ctrl+X, D)." });
+  def("cmponly", "Show only differences", "", () => { FM.cmp.onlyDiff = !FM.cmp.onlyDiff; renderCmpBar(); if (FM.cmp.counts) cmpRefill(false); }, { group: "Compare and sync", why: () => FM.cmp ? "" : "Compare two folders first (Ctrl+X, D)." });
+  def("sync", "Review sync", "", syncDlg, { group: "Compare and sync", why: () => !FM.cmp ? "Compare two folders first (Ctrl+X, D)." : FM.cmp.state !== "ready" || !FM.cmp.complete || FM.cmp.truncated ? "Sync needs a complete comparison. Compare again first." : !FM.cmp.counts?.diff ? "There's nothing to sync." : "" });
+  def("extract", "Extract…", "F5", () => extractDlg(false), { group: "Archives", why: () => AT().kind === "archive" ? need.sel() : "Open an archive first (Enter on a .zip or .tar file)." });
+  def("extractAll", "Extract the whole archive", "Alt+F9", () => extractDlg(true), { group: "Archives", why: () => {
+    const t = AT(), r = curRow(t);
+    return FM.cmp ? RO_CMP : t.kind === "archive" || (r && !isDir(r) && ARCH_RE.test(r.n)) ? "" : "Put the cursor on a .zip or .tar archive first.";
+  } });
+  def("pack", "Create ZIP archive", "Alt+F5", packDlg, { group: "Archives", why: () => roWhy() || (AT().kind !== "dir" ? "Open a folder first." : need.sel()) });
+  def("checksums", "Checksums", "", checksumsDlg, { group: "Files", why: () => AT().kind === "archive" ? "Extract these files before checking them." : need.sel() });
+  Object.assign(GLOBAL_KEYS, { "Shift+F4": "newedit", "Alt+F9": "extractAll", "Alt+F5": "pack" });
+}
+function fkeyLabels() {
+  const t = AT(), f5 = FM.fkeysEl?.querySelector('[data-cmd="copy"] span');
+  if (f5) f5.textContent = t.kind === "archive" ? "Extract" : "Copy";
+}
+
 /* ------------------------------------------------------------------ preferences */
 let saveT = 0;
 function savePrefs() {
@@ -2507,7 +3863,7 @@ function savePrefs() {
   saveT = setTimeout(() => {
     const pane = P => {
       const tabs = P.tabs.filter(t => t.kind === "dir" && t.path);
-      const act = tabs.indexOf(tabOf(P));
+      const act = tabs.indexOf(P.tabs[P.ti]);
       return { tabs: tabs.map(t => ({ path: t.path, sort: t.sort, desc: t.desc, biggest: t.biggest, listing: t.listing })), active: Math.max(0, act), on: P === AP() };
     };
     const prefs = { left: { ...pane(FM.panes[0]), split: FM.split, cols: FM.cols }, right: pane(FM.panes[1]), hotlist: FM.hotlist,
@@ -2520,6 +3876,7 @@ function savePrefs() {
 async function init() {
   build();
   defineCommands();
+  extendCommands();
   renderFkeys();
   FM.root.querySelector(".fm-panes").hidden = true;
   const boot = ce("div", "fm-boot", `<div class="loading">${SPIN}Opening Files…</div>`);

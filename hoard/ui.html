@@ -543,7 +543,7 @@ main[hidden], .toolbar[hidden], .tabs button[hidden] { display: none; }
 .simpletoggle input:checked + .sw { background: var(--accent); }
 .simpletoggle input:checked + .sw::after { transform: translateX(14px); }
 .simpletoggle input:focus-visible + .sw { outline: 2px solid var(--accent); outline-offset: 2px; }
-body.simple .views, body.simple #scanBtn { display: none; }
+body.simple .views { display: none; }   /* the header itself (Rescan included) stays the same in every mode */
 .simple-wrap { max-width: 1120px; margin: 0 auto; padding: 24px 24px 60px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 1000px) {
   .simple-wrap { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; }
@@ -2672,8 +2672,8 @@ async function renderSimple() {
       <div style="color:var(--ink-3);font-weight:600">${esc(d.name)} ${esc(d.type === "cloud" ? "" : d.label || "")}</div>
       <div class="free num">${d.total ? fmt(d.free) : fmt(S.view?.s || 0)} <small>${d.total ? `free of ${fmt(d.total)}` : "in use"}</small></div>
       ${d.total ? `<div class="verdict ${cls}">${verdict}</div>` : ""}</div>
-      <div style="text-align:right"><button class="btn ${S.meta?.has ? "" : "primary"} bigbtn" id="simpleScan" ${S.scanning ? "disabled" : ""}>${S.scanning ? "Checking…" : S.meta?.has ? "Check again" : "Check this drive"}</button>
-        <div style="font-size:12px;color:var(--ink-3);margin-top:6px">${S.scanning ? "This takes a minute or less" : checked}</div></div>
+      <div style="text-align:right">${S.meta?.has || S.scanning ? "" : `<button class="btn primary bigbtn" id="simpleScan">Check this drive</button>`}
+        <div style="font-size:12px;color:var(--ink-3);margin-top:6px">${S.scanning ? "Checking now: this takes a minute or less" : S.meta?.has ? `${checked} · Rescan is at the top right` : checked}</div></div>
       ${d.total ? `<div class="meter" role="img" aria-label="${fmt(d.used)} used, ${fmt(d.free)} free"><i class="${cls}" style="width:${(pct * 100).toFixed(1)}%"></i></div>
         <div class="meterlabel" aria-hidden="true"><span>${fmt(d.used)} used</span><span>${fmt(d.free)} free</span></div>` : ""}</div>`;
   if (!S.meta?.has || !S.view) {
@@ -2691,7 +2691,7 @@ async function renderSimple() {
         </ol>
         <button class="btn primary bigbtn" id="wGo">Check ${esc(d.name)} now</button></div>`
       : `<div class="scard"><h3>Let Hoard take a look</h3><p class="sub">Press <b>Check this drive</b>. Hoard reads every folder, nothing is changed, and then shows you what's using the space and what's safe to remove.</p></div>`}</div>`;
-    $("#simpleScan").onclick = startScan;
+    const ss = $("#simpleScan"); if (ss) ss.onclick = startScan;
     const go = $("#wGo");
     if (go) go.onclick = async () => {
       go.disabled = true;
@@ -2717,9 +2717,10 @@ async function renderSimple() {
         <span class="s">${fmt(f.s)}</span><span class="a"><button class="btn" data-fshow="${k}">Show on map</button></span></div>`).join("") || `<p class="sub">Nothing stands out.</p>`}</div>
     <div class="scard" id="sOld"><h3>Big files you haven't touched in a year</h3><div class="loading">${SPIN}Looking…</div></div>
     <div class="scard wide" id="sGrew"><h3>What grew lately</h3><div class="loading">${SPIN}Comparing…</div></div>
-    <div class="simple-foot wide"><span>Want every folder as a map, plus duplicates and apps?</span><button class="btn" id="sFull">Explore the full map</button></div></div>`;
-  $("#simpleScan").onclick = startScan;
+    <div class="simple-foot wide"><span>Want more?</span><button class="btn" id="sFull">Explore the full map</button>
+      <button class="btn" id="sFiles" title="Two-pane file manager: copy, move, compare and tidy folders (key 5 outside Simple view)">Open Files (two panes)</button></div></div>`;
   $("#sFull").onclick = () => setSimple(false, { visit: true });
+  $("#sFiles").onclick = () => { setSimple(false, { visit: true }); setMode("files"); };
   p.querySelectorAll("[data-fshow]").forEach(b => b.onclick = () => showOnMap(folders[+b.dataset.fshow].p, folders[+b.dataset.fshow]));
   fillSimpleClean(my); fillSimpleOld(my); fillSimpleGrew(my);
 }

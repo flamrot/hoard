@@ -635,14 +635,59 @@ def tree_problem(path):
     return why
 
 
+def is_volume_root(path):
+    """Is path itself the root of its volume (Windows: GetVolumePathNameW gives the path back; POSIX: a mount)?"""
+    try:
+        if NAME == "windows":
+            root = _os.volume_root(path)
+            return bool(root) and path_key(root) == path_key(path)
+        return os.path.ismount(path)
+    except OSError:
+        return False
+
+
+_FAT = {"fat", "fat12", "fat16", "fat32", "exfat", "vfat", "msdos"}
+
+
+def stable_ids(path):
+    """Do file ids on this volume survive a rename? Not on FAT/exFAT, where they come from the position of the
+    directory entry: there an item renamed is recognised by size, modified and created times instead."""
+    try:
+        if NAME == "windows":
+            return _os.fs_name(path).lower() not in _FAT
+        if NAME == "linux":
+            real = os.path.realpath(path)
+            best = ("", "")
+            for _src, mnt, fs in _os._mounts():
+                if (real == mnt or real.startswith(mnt.rstrip("/") + "/")) and len(mnt) > len(best[0]):
+                    best = (mnt, fs)
+            return best[1].lower() not in _FAT
+    except OSError:
+        pass
+    return True
+
+
+def replace_file(replaced, replacement, backup):
+    return _os.replace_file(replaced, replacement, backup) if NAME == "windows" else (False, 50)
+
+
+def _ids_expected(folder):
+    """Does this folder's disk give items real file ids? (FAT/exFAT roots and some shares report 0: there, only
+    the path rules can apply.)"""
+    try:
+        return bool(os.lstat(folder).st_ino)
+    except OSError:
+        return True
+
+
 def child_problem(parent_real, name, st=None):
     """Reason the item `name` inside an already verified folder may not be changed (path rules, and identity when
     its lstat is known), else None. Cheap: no walk, the folder above was checked when it was opened."""
     why = critical_key(path_key(os.path.join(parent_real, name)))
     if why is None and st is not None:
         why = id_item_why(st)
-        if why is None and not st.st_ino and os.path.lexists(os.path.join(parent_real, name)):
-            why = UNSURE
+        if why is None and not st.st_ino and _ids_expected(parent_real):
+            why = UNSURE                                # an id-less item on a disk that has ids: suspicious
     return why
 
 
@@ -676,8 +721,8 @@ def critical(path):
         why = id_item_why(chain[-1])
         if why:
             return why
-        if not chain[-1].st_ino:
-            return UNSURE
+        if not chain[-1].st_ino and len(chain) > 1 and chain[-2].st_ino:
+            return UNSURE                               # id-less item on a disk that has ids (else: path rules only)
         if NAME != "windows":
             try:
                 if os.path.ismount(real):

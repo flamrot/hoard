@@ -1642,6 +1642,30 @@ class Handler(BaseHTTPRequestHandler):
     def api_fm_prefs(self, b):
         return fm.fm_prefs(b)
 
+    def api_fm_compare(self, b):
+        return fm.fm_compare(b)
+
+    def api_fm_results(self, b):
+        return fm.fm_results(b)
+
+    def api_fm_sync_plan(self, b):
+        return fm.fm_sync_plan(b)
+
+    def api_fm_archive_open(self, b):
+        return fm.fm_archive_open(b)
+
+    def api_fm_archive_list(self, b):
+        return fm.fm_archive_list(b)
+
+    def api_fm_archive_read(self, b):
+        return fm.fm_archive_read(b)
+
+    def api_fm_checksums(self, b):
+        return fm.fm_checksums(b)
+
+    def api_fm_edit_open(self, b):
+        return fm.fm_edit_open(b)
+
     def api_open_folder(self, b):
         p = b.get("which") == "reports" and core.load_settings().get("reportDir")
         if p and os.path.isdir(p):
