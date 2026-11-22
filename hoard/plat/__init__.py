@@ -112,8 +112,10 @@ def _known_folder(guid_hex, xdg_name, fallback):
     if NAME == "linux":
         try:
             r = subprocess.run(["xdg-user-dir", xdg_name], capture_output=True, text=True, env=host_env())
-            if r.returncode == 0 and r.stdout.strip():
-                return r.stdout.strip()
+            got = r.stdout.strip()
+            # an unset XDG folder comes back as the home folder itself: that is not "Documents"
+            if r.returncode == 0 and got and os.path.normpath(got) != os.path.normpath(os.path.expanduser("~")):
+                return got
         except OSError:
             pass
     return os.path.join(os.path.expanduser("~"), fallback)
@@ -233,10 +235,12 @@ def linked_ancestor(root, parts):
 
 
 def identity(path):
-    """(device, file id, is folder) of the item at path itself, not following links."""
+    """(device, file id, is folder, modified time in ns for files) of the item at path itself, not following links.
+    The time matters on Linux, which hands a deleted file's inode number to the next new file at once."""
     import stat as _stat
     st = os.lstat(path)
-    return [int(st.st_dev), int(st.st_ino), _stat.S_ISDIR(st.st_mode)]
+    folder = _stat.S_ISDIR(st.st_mode)
+    return [int(st.st_dev), int(st.st_ino), folder, 0 if folder else int(st.st_mtime_ns)]
 
 
 def pin_dir(path, expect=None):

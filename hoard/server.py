@@ -202,7 +202,8 @@ def trash_any(vid, parts, expect=None):
             now = plat.identity(p)
         except OSError:
             return True, "gone"
-        if (len(expect) == 3 and now != list(expect)) or (len(expect) == 1 and now[2] != expect[0]):
+        # [dev, ino, folder, mtime_ns] now; lists marked by older versions have the first three only
+        if (len(expect) >= 3 and now[:len(expect)] != list(expect)) or (len(expect) == 1 and now[2] != expect[0]):
             return False, ("This changed since you marked it: something else is at that path now. "
                            "Mark it again if you still want it removed.")
     # hold the folders from the root of the disk down to the item while the OS trashes it, and check the item
@@ -210,7 +211,7 @@ def trash_any(vid, parts, expect=None):
     try:
         with safefs.Dir.open(os.path.dirname(p), guard=True) as d:
             name = os.path.basename(p)
-            now = d.check(name, list(expect) if expect is not None and len(expect) == 3 else None, guard=True)
+            now = d.check(name, list(expect)[:3] if expect is not None and len(expect) >= 3 else None, guard=True)
             if expect is not None and len(expect) == 1 and (stat.S_ISDIR(now.st_mode) and not plat.is_link(now)) != expect[0]:
                 raise safefs.Unsafe(safefs.CHANGED)
             ok, err, _where = d.trash(name, safefs.ident(now))

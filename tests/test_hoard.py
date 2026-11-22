@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 
-TMP = tempfile.mkdtemp(prefix="hoard-tests-")
+TMP = os.path.realpath(tempfile.mkdtemp(prefix="hoard-tests-"))
 os.environ["HOARD_DATA_DIR"] = os.path.join(TMP, "data")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hoard"))
 

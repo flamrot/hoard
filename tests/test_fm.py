@@ -9,7 +9,8 @@ import tempfile
 import time
 import unittest
 
-TMP = tempfile.mkdtemp(prefix="hoard-fm-tests-")
+# realpath: macOS temp lives under /var, a link to /private/var, and Hoard reports real paths
+TMP = os.path.realpath(tempfile.mkdtemp(prefix="hoard-fm-tests-"))
 os.environ["HOARD_DATA_DIR"] = os.path.join(TMP, "data")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hoard"))
 
@@ -35,6 +36,11 @@ def write(path, data=b"x", mtime=None):
 def read(path):
     with open(path, "rb") as f:
         return f.read()
+
+
+def ls(path):
+    """os.listdir without Finder's .DS_Store (macOS writes one when Finder moves something to the Trash)."""
+    return [n for n in os.listdir(path) if n != ".DS_Store"]
 
 
 def make_junction(link, target):
@@ -127,9 +133,20 @@ def run(op, conflict="ask", exclude=(), confirm=False, **body):
     return wait(r["job"])
 
 
+def _cancel_leftovers():
+    """A failed test can leave its job waiting on a question; cancel it so the next test's jobs aren't stuck behind it."""
+    for j in list(fm.JOBS.values()):
+        if j.state not in ("done", "cancelled", "failed"):
+            fm.fm_control({"job": j.id, "action": "cancel"})
+    end = time.time() + 10
+    while time.time() < end and any(j.state not in ("done", "cancelled", "failed") for j in list(fm.JOBS.values())):
+        time.sleep(0.02)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(dir=TMP)
+        self.addCleanup(_cancel_leftovers)
 
 
 class Listing(Base):
@@ -412,7 +429,7 @@ class Links(Base):
         self.assertEqual(j.state, "done", j.errors)
         copied = os.path.join(dest, "work", "link")
         self.assertTrue(plat.is_link(os.lstat(copied)))
-        self.assertEqual(os.listdir(self.outside), ["precious.txt"])
+        self.assertEqual(ls(self.outside), ["precious.txt"])
         dest2 = tempfile.mkdtemp(dir=TMP)
         j = run("move", sources=[self.work], dest=dest2)
         self.assertEqual(j.state, "done", j.errors)
@@ -425,7 +442,7 @@ class Links(Base):
         write(os.path.join(src, "work", "link", "new.txt"), b"new")
         j = run("copy", sources=[os.path.join(src, "work")], dest=self.d, conflict="skip")
         self.assertEqual(j.state, "done", j.errors)
-        self.assertEqual(os.listdir(self.outside), ["precious.txt"])
+        self.assertEqual(ls(self.outside), ["precious.txt"])
 
 
 class Operations(Base):
@@ -440,14 +457,14 @@ class Operations(Base):
         self.assertEqual(read(os.path.join(dest, "src", "sub", "b.txt")), b"world")
         self.assertAlmostEqual(os.path.getmtime(os.path.join(dest, "src", "a.txt")), old, delta=2)
         self.assertEqual((j.total_n, j.total_b, j.done_b), (2, 10, 10))
-        self.assertFalse([n for n in os.listdir(dest) if n.endswith(".part")])
+        self.assertFalse([n for n in ls(dest) if n.endswith(".part")])
         self.assertTrue(j.journal)
 
     def test_copy_into_same_folder_keeps_both(self):
         write(os.path.join(self.d, "a.txt"), b"1")
         j = run("copy", sources=[os.path.join(self.d, "a.txt")], dest=self.d)
         self.assertEqual(j.state, "done", j.errors)
-        self.assertEqual(sorted(os.listdir(self.d)), ["a (2).txt", "a.txt"])
+        self.assertEqual(sorted(ls(self.d)), ["a (2).txt", "a.txt"])
 
     def test_folder_cannot_go_into_itself(self):
         os.makedirs(os.path.join(self.d, "f", "inner"))
@@ -566,7 +583,7 @@ class Operations(Base):
         finally:
             fm.Job.add_bytes = orig
         self.assertEqual(j.state, "cancelled")
-        self.assertEqual(os.listdir(dest), [])        # neither big.bin nor a .part file
+        self.assertEqual(ls(dest), [])        # neither big.bin nor a .part file
         self.assertIn("Stopped.", j.summary)
 
     def test_pause_and_resume(self):
@@ -608,7 +625,7 @@ class Undo(Base):
         self.assertTrue(os.path.exists(os.path.join(self.d, "new.txt")))
         u = self.undo(j.journal)
         self.assertEqual(u.state, "done", u.errors)
-        self.assertEqual(os.listdir(self.d), ["old.txt"])
+        self.assertEqual(ls(self.d), ["old.txt"])
         self.assertIn("already", fm.fm_undo({"journal": j.journal})["error"])
         hist = fm.fm_jobs({})["history"]
         self.assertTrue(any(h["id"] == j.id and h["undo"] is None for h in hist))
@@ -621,7 +638,7 @@ class Undo(Base):
         u = self.undo(j.journal)
         self.assertEqual(u.state, "done", u.errors)
         self.assertEqual(read(f), b"1")
-        self.assertEqual(os.listdir(os.path.join(self.d, "b")), [])
+        self.assertEqual(ls(os.path.join(self.d, "b")), [])
 
     def test_move_between_disks_copies_then_removes_and_undoes(self):
         write(os.path.join(self.d, "a", "f", "x.txt"), b"x")
@@ -635,7 +652,7 @@ class Undo(Base):
             u = self.undo(j.journal)
         self.assertEqual(u.errors, [])
         self.assertEqual(read(os.path.join(self.d, "a", "f", "sub", "y.txt")), b"yy")
-        self.assertEqual(os.listdir(os.path.join(self.d, "b")), [])
+        self.assertEqual(ls(os.path.join(self.d, "b")), [])
 
     def test_undo_copy_moves_unchanged_copies_to_the_trash(self):
         src = write(os.path.join(self.d, "src", "c.txt"), b"copy me")
@@ -645,7 +662,7 @@ class Undo(Base):
         self.assertTrue(os.path.exists(os.path.join(dest, "c.txt")))
         u = self.undo(j.journal)                                 # a file this test created, in a temp folder
         self.assertEqual(u.errors, [])
-        self.assertEqual(os.listdir(dest), [])
+        self.assertEqual(ls(dest), [])
         self.assertTrue(os.path.exists(src))
 
     def test_undo_mkdir_only_when_still_empty(self):
@@ -893,7 +910,7 @@ class Hardening(Base):
         make_junction(a, target)                                       # the original folder is now a link
         u = wait(fm.fm_undo({"journal": j.journal})["job"])
         self.assertTrue(u.errors)
-        self.assertEqual(os.listdir(target), [])                       # nothing written through the junction
+        self.assertEqual(ls(target), [])                       # nothing written through the junction
         self.assertTrue(os.path.exists(os.path.join(b, "f.txt")))
         entry = next(e for e in fm._journal_read() if e["id"] == j.journal)
         self.assertFalse(entry["undone"])                              # still retryable
@@ -953,7 +970,7 @@ class Hardening(Base):
         finally:
             fm.safefs.Dir.rename_to = orig
         self.assertEqual(j.state, "cancelled")
-        self.assertEqual(sorted(os.listdir(self.d)), [f"f{i}.txt" for i in range(4)])
+        self.assertEqual(sorted(ls(self.d)), [f"f{i}.txt" for i in range(4)])
         self.assertFalse([r for r in fm._pending_read() if r.get("job") == j.id])
 
     def test_multi_rename_cancelled_while_finishing_leaves_no_temp_names(self):
@@ -964,10 +981,10 @@ class Hardening(Base):
         finally:
             fm.safefs.Dir.rename_to = orig
         self.assertEqual(j.state, "cancelled")
-        self.assertEqual(sorted(os.listdir(self.d)), ["f1.txt", "f2.txt", "f3.txt", "g0.txt"])
+        self.assertEqual(sorted(ls(self.d)), ["f1.txt", "f2.txt", "f3.txt", "g0.txt"])
         u = wait(fm.fm_undo({"journal": j.journal})["job"])            # the finished one is undoable
         self.assertEqual(u.errors, [])
-        self.assertEqual(sorted(os.listdir(self.d)), [f"f{i}.txt" for i in range(4)])
+        self.assertEqual(sorted(ls(self.d)), [f"f{i}.txt" for i in range(4)])
 
     def test_recovery_after_a_crash(self):
         # a staged rename and a half-written copy left behind by a job that never finished
@@ -1017,7 +1034,7 @@ class Hardening(Base):
         self.assertEqual(u.errors, [])
         got = sorted(os.path.relpath(os.path.join(r, f), src) for r, _d, fs in os.walk(src) for f in fs)
         self.assertEqual(got, sorted(os.path.join("sub", f"p{i}.jpg") if i % 2 else f"p{i}.jpg" for i in range(5)))
-        self.assertEqual(os.listdir(dest), [])
+        self.assertEqual(ls(dest), [])
 
     # ---- 6. undo of a copied folder keeps edits and additions
     def test_undo_of_copied_folder_keeps_edited_and_added_files(self):
@@ -1048,7 +1065,7 @@ class Hardening(Base):
         j = run("copy", sources=[src], dest=dest)
         u = wait(fm.fm_undo({"journal": j.journal})["job"])
         self.assertEqual(u.errors, [])
-        self.assertEqual(os.listdir(dest), [])
+        self.assertEqual(ls(dest), [])
         self.assertTrue(next(e for e in fm._journal_read() if e["id"] == j.journal)["undone"])
 
     # ---- 7. renames never replace
@@ -1086,7 +1103,7 @@ class Hardening(Base):
         finally:
             fm.Job.add_bytes = orig
         self.assertEqual(read(os.path.join(dest, "doc.txt")), b"newer work")
-        self.assertEqual(os.listdir(dest), ["doc.txt"])               # and no .part left
+        self.assertEqual(ls(dest), ["doc.txt"])               # and no .part left
 
     # ---- 8./10. reads never go through links
     def test_reads_through_a_linked_ancestor_are_refused(self):
@@ -1168,6 +1185,7 @@ class IdlessDisks(Base):
         self.root = os.path.join(self.d, "root")              # stands in for the drive root
         os.makedirs(self.root)
 
+    @unittest.skipUnless(WIN, "macOS and Linux file systems always report inode numbers: no id-less disks there")
     def test_copy_into_a_folder_without_file_ids(self):
         src = write(os.path.join(self.d, "src", "a.txt"), b"a")
         write(os.path.join(self.d, "src", "tree", "b.txt"), b"b")
@@ -1180,8 +1198,9 @@ class IdlessDisks(Base):
         with zero_ids(self.root):
             u = wait(fm.fm_undo({"journal": j.journal})["job"])
         self.assertEqual(u.errors, [])
-        self.assertEqual(os.listdir(self.root), [])
+        self.assertEqual(ls(self.root), [])
 
+    @unittest.skipUnless(WIN, "macOS and Linux file systems always report inode numbers: no id-less disks there")
     def test_move_into_a_folder_without_file_ids(self):
         src = write(os.path.join(self.d, "src", "m.txt"), b"m")
         with zero_ids(self.root):
@@ -1398,6 +1417,7 @@ class Sync(CompareFixture):
         self.assertEqual(read(os.path.join(self.R, "newer.txt")), b"right!")      # not replaced
         self.assertEqual(j.counts["skipped"], 1)
 
+    @unittest.skipUnless(WIN, "macOS and Linux file systems always report inode numbers: no id-less disks there")
     def test_sync_into_a_folder_without_file_ids(self):
         rid, _rows = self.compare()
         p = self.sync_plan(rid)
@@ -1478,7 +1498,7 @@ class Archives(ArchiveFixture):
         u = wait(fm.fm_undo({"journal": j.journal})["job"])
         self.assertEqual(u.errors, [])
         wait(fm.fm_undo({"journal": j2.journal})["job"])
-        self.assertEqual(os.listdir(out), [])
+        self.assertEqual(ls(out), [])
         u = wait(fm.fm_undo({"journal": fm.JOBS[[k for k, v in fm.JOBS.items() if v.op == "pack"][-1]].journal})["job"])
         self.assertFalse(os.path.exists(z))
 
@@ -1495,6 +1515,7 @@ class Archives(ArchiveFixture):
         self.assertEqual(j.errors, [])
         self.assertEqual(read(os.path.join(out, "proj", "docs", "b.md")), b"beta")
 
+    @unittest.skipUnless(WIN, "macOS and Linux file systems always report inode numbers: no id-less disks there")
     def test_extract_into_a_folder_without_file_ids(self):
         import tarfile
         p = os.path.join(self.d, "p.tar")
@@ -1686,12 +1707,12 @@ class Editor(Base):
 
     def test_undo_restores_the_previous_version(self):
         p, j = self.round_trip(b"first version\n", "utf-8", False)
-        self.assertEqual(sorted(os.listdir(self.d)), [os.path.basename(p)])     # previous version went to the bin
-        self.assertTrue(any(f.endswith(".bin") for f in os.listdir(fm.BACKUPS)))
+        self.assertEqual(sorted(ls(self.d)), [os.path.basename(p)])     # previous version went to the bin
+        self.assertTrue(any(f.endswith(".bin") for f in ls(fm.BACKUPS)))
         u = wait(fm.fm_undo({"journal": j.journal})["job"])
         self.assertEqual(u.errors, [])
         self.assertEqual(read(p), b"first version\n")
-        self.assertEqual(sorted(os.listdir(self.d)), [os.path.basename(p)])
+        self.assertEqual(sorted(ls(self.d)), [os.path.basename(p)])
 
     def test_undo_refused_after_a_later_change(self):
         p, j = self.round_trip(b"v1", "utf-8", False)
@@ -1821,7 +1842,7 @@ class Round3Editor(Base):
     def assert_untouched(self, j):
         self.assertEqual(j.state, "failed")
         self.assertEqual(read(self.p), b"original")
-        self.assertEqual(os.listdir(self.d), ["doc.txt"])                       # no temp, no stray previous
+        self.assertEqual(ls(self.d), ["doc.txt"])                       # no temp, no stray previous
         self.assertEqual(self.pending(), [])
 
     def test_each_step_fails_cleanly(self):
@@ -1858,7 +1879,7 @@ class Round3Editor(Base):
                          "tmp": ".hoard-crashjob-1.part", "prev": "doc (previous version).txt"})
         notes = fm.recover()
         self.assertEqual(read(self.p), b"original")
-        self.assertEqual(os.listdir(self.d), ["doc.txt"])
+        self.assertEqual(ls(self.d), ["doc.txt"])
         self.assertTrue(any("doc.txt" in n for n in notes))
 
     def test_trash_failure_keeps_the_previous_version_visible(self):
@@ -1908,7 +1929,7 @@ class Round3Replace(ArchiveFixture):
         j = run("extract", archive=rid, members=["note.txt"], dest=out, conflict="replace")
         self.assertEqual(j.errors, [])
         self.assertEqual(read(os.path.join(out, "note.txt")), b"from the archive")
-        self.assertEqual(os.listdir(out), ["note.txt"])                         # the old one is in the Trash
+        self.assertEqual(ls(out), ["note.txt"])                         # the old one is in the Trash
         wait(fm.fm_undo({"journal": j.journal})["job"])
         self.assertEqual(read(os.path.join(out, "note.txt")), b"mine")
 
@@ -1929,7 +1950,7 @@ class Round3Replace(ArchiveFixture):
             fm.Job.add_bytes = orig
         self.assertEqual(j.state, "cancelled")
         self.assertEqual(read(os.path.join(out, "note.txt")), b"mine")
-        self.assertEqual(os.listdir(out), ["note.txt"])
+        self.assertEqual(ls(out), ["note.txt"])
 
     def test_pack_and_checksum_replacements(self):
         dest = os.path.join(self.d, "out")
@@ -1991,21 +2012,29 @@ class Round3Ids(Base):
             self.assertEqual(read(g), b"one")
             j = run("delete", sources=[g], confirm=True)
             self.assertEqual(j.errors, [])
-        self.assertEqual(os.listdir(self.d), [])
+        self.assertEqual(ls(self.d), [])
 
     def test_swap_without_ids_is_refused(self):
         with zero_ids_at(self.d, self.f):
-            p = plan("delete", sources=[self.f])
+            p = fm.fm_plan({"op": "delete", "sources": [self.f]})
+            if "error" in p:                       # macOS/Linux refuse id-less items already when planning
+                self.assertTrue(os.path.exists(self.f))
+                return
             time.sleep(0.02)
             os.remove(self.f)
             write(self.f, b"someone else's new file")
-            j = wait(fm.fm_start({"plan": p["plan"], "confirm": True})["job"])
-        self.assertTrue(j.errors)
+            r = fm.fm_start({"plan": p["plan"], "confirm": True})
+            if "job" in r:
+                self.assertTrue(wait(r["job"]).errors)
         self.assertEqual(read(self.f), b"someone else's new file")
 
     def test_trash_without_ids_is_refused(self):
         with zero_ids_at(self.d, self.f):
-            j = run("trash", sources=[self.f])
+            p = fm.fm_plan({"op": "trash", "sources": [self.f]})
+            if "error" in p:                       # macOS/Linux refuse id-less items already when planning
+                self.assertTrue(os.path.exists(self.f))
+                return
+            j = wait(fm.fm_start({"plan": p["plan"], "conflict": "ask", "exclude": [], "confirm": False})["job"])
         self.assertEqual(j.errors[0]["message"], fm.safefs.NO_ID_TRASH)
         self.assertTrue(os.path.exists(self.f))
 
@@ -2029,7 +2058,7 @@ class Round3Ids(Base):
             os.makedirs(folder)                                    # the destination folder swapped too
             j = wait(fm.fm_start({"plan": p["plan"]})["job"])
             self.assertIn("changed", j.errors[0]["message"])
-            self.assertEqual(os.listdir(folder), [])
+            self.assertEqual(ls(folder), [])
             f = os.path.join(moved, "f.txt")                     # (it moved with its folder)
             o = fm.fm_edit_open({"path": f})                       # editor save on exFAT (ReplaceFileW)
             import base64
