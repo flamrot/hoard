@@ -2034,7 +2034,12 @@ class Round3Ids(Base):
             if "error" in p:                       # macOS/Linux refuse id-less items already when planning
                 self.assertTrue(os.path.exists(self.f))
                 return
-            j = wait(fm.fm_start({"plan": p["plan"], "conflict": "ask", "exclude": [], "confirm": False})["job"])
+            r = fm.fm_start({"plan": p["plan"], "conflict": "ask", "exclude": [], "confirm": False})
+            if "job" not in r:                     # ... or when starting
+                self.assertIn("error", r)
+                self.assertTrue(os.path.exists(self.f))
+                return
+            j = wait(r["job"])
         self.assertEqual(j.errors[0]["message"], fm.safefs.NO_ID_TRASH)
         self.assertTrue(os.path.exists(self.f))
 
