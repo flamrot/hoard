@@ -13,6 +13,7 @@
   <a href="https://github.com/flamrot/hoard/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/flamrot/hoard?label=download"></a>
   <a href="https://github.com/flamrot/hoard/actions/workflows/build.yml"><img alt="Build" src="https://github.com/flamrot/hoard/actions/workflows/build.yml/badge.svg"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
 ---
@@ -184,6 +185,4 @@ tests/              unit tests
 
 ## License
 
-Copyright © the Hoard authors. All rights reserved.
-
-The source is public so you can read it, review it and build it yourself. No open-source license is granted, so please ask before reusing or redistributing the code.
+[MIT](LICENSE) © 2026 flamrot. You're free to use, change and share Hoard, as long as the copyright notice comes along.
