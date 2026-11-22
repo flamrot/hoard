@@ -1,0 +1,27 @@
+name: Tests (macOS, Linux)
+
+# Quick unit-test run on the platforms we can't test locally: runs on fix/test branches and on demand.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["fix/**", "test/**"]
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: Unit tests
+        run: python -X faulthandler -I -m unittest discover -s tests -v 2>&1 | tee unit.log; test ${PIPESTATUS[0]} -eq 0
+        shell: bash
+      - name: Failures only
+        if: failure()
+        run: grep -nE "^(FAIL|ERROR):|Error|Traceback|still queued|unfinished job|--- thread" unit.log | head -200
+        shell: bash

@@ -46,6 +46,22 @@ def make_junction(link, target):
         os.symlink(target, link)
 
 
+def _stuck_report(jid):
+    """When a job never finishes, say what every job and thread is doing (for CI on machines we can't reach)."""
+    import threading
+    import traceback
+    lines = [f"job {jid} still {fm.JOBS[jid].state}"]
+    for j in list(fm.JOBS.values()):
+        if j.state not in ("done", "cancelled", "failed"):
+            lines.append(f"  unfinished job {j.id} {j.op} {j.state} current={j.current!r} question={j.question!r}")
+    names = {t.ident: t.name for t in threading.enumerate()}
+    for ident, frame in sys._current_frames().items():
+        if ident != threading.get_ident():
+            lines.append(f"--- thread {names.get(ident, ident)}")
+            lines += ["  " + ln.rstrip() for ln in traceback.format_stack(frame)[-8:]]
+    return "\n".join(lines)
+
+
 def wait(jid, timeout=30):
     end = time.time() + timeout
     while time.time() < end:
@@ -53,7 +69,7 @@ def wait(jid, timeout=30):
         if j.state in ("done", "cancelled", "failed"):
             return j
         time.sleep(0.01)
-    raise AssertionError(f"job {jid} still {fm.JOBS[jid].state}")
+    raise AssertionError(_stuck_report(jid))
 
 
 def wait_question(jid, timeout=30):
