@@ -202,7 +202,7 @@ def trash_any(vid, parts, expect=None):
             now = plat.identity(p)
         except OSError:
             return True, "gone"
-        # [dev, ino, folder, mtime_ns] now; lists marked by older versions have the first three only
+        # [dev, ino, folder, mtime_ns, size] now; lists marked by older versions have fewer (compared as far as they go)
         if (len(expect) >= 3 and now[:len(expect)] != list(expect)) or (len(expect) == 1 and now[2] != expect[0]):
             return False, ("This changed since you marked it: something else is at that path now. "
                            "Mark it again if you still want it removed.")

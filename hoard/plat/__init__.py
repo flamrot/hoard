@@ -235,12 +235,13 @@ def linked_ancestor(root, parts):
 
 
 def identity(path):
-    """(device, file id, is folder, modified time in ns for files) of the item at path itself, not following links.
-    The time matters on Linux, which hands a deleted file's inode number to the next new file at once."""
+    """(device, file id, is folder, modified time in ns, size) of the item at path itself, not following links;
+    time and size are 0 for folders. They matter on Linux, which hands a deleted file's inode number to the next
+    new file at once, and whose file clock ticks only every few milliseconds, so the time alone can match too."""
     import stat as _stat
     st = os.lstat(path)
     folder = _stat.S_ISDIR(st.st_mode)
-    return [int(st.st_dev), int(st.st_ino), folder, 0 if folder else int(st.st_mtime_ns)]
+    return [int(st.st_dev), int(st.st_ino), folder, 0 if folder else int(st.st_mtime_ns), 0 if folder else int(st.st_size)]
 
 
 def pin_dir(path, expect=None):
